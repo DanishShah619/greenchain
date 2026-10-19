@@ -53,6 +53,20 @@ Open http://localhost:3000. The API runs on http://localhost:4000. Public visito
 
 The schema is versioned SQL in `apps/api/migrations/NNNN_name.sql`, applied in order by `npm run db:setup` (or on its own with `npm run db:migrate -w apps/api`). Each run is one transaction behind an advisory lock, so two hosts starting together are safe and a failed migration changes nothing. Applied files are checksummed: editing one after it ran is refused, so a schema change is always a **new** numbered file. A database created before migrations existed (all expected tables present, no history) is recorded as already at `0001` and then brought up to date; a half-built one is refused with `LEGACY_SCHEMA_INCOMPLETE`. A database newer than the code (`MIGRATION_UNKNOWN_APPLIED`) is also refused. Migrations are forward-only; take a backup before applying one to anything that matters. `CREATE INDEX CONCURRENTLY` and other non-transactional DDL are not supported by the runner.
 
+### Worker operations
+
+`npm run worker` runs the audit chainer and proof worker. It logs structured JSON (pino; secrets, RPC URLs and raw error messages are never written, only safe error codes), never exits on a failed cycle (it backs off up to 30 s and carries on), and stops cleanly on SIGINT/SIGTERM. A read-only endpoint on `127.0.0.1:4100` serves `GET /healthz` (200 healthy/starting, 503 when no cycle completed within `HEALTH_MAX_AGE_SECONDS` or audit integrity failed) and `GET /metrics` (Prometheus text: cycles, proof counts by status, oldest unfinished proof age, audit lag/pending/integrity, full-verification age). It has no authentication: keep it on loopback or behind network controls. Each cycle also writes a `worker_heartbeat` row.
+
+Failed proof steps retry with capped exponential backoff and jitter. A proof that never produced a signed transaction is parked as `FAILED` after `PROOF_MAX_FAILURES` consecutive failures; a proof that has a signed transaction is never abandoned (it stays `RECONCILING`) because it may still land. Operators inspect and retry with:
+
+```powershell
+npm run proofs -w apps/api -- list
+npm run proofs -w apps/api -- requeue <eventId> <operator-name>
+npm run audit:verify -w apps/api      # full re-verification of the audit chain (slow on large logs)
+```
+
+Tuning (all optional): `PROOF_MAX_FAILURES` (8), `PROOF_RETRY_BASE_SECONDS` (30), `PROOF_RETRY_MAX_SECONDS` (900), `PROOF_POLL_SECONDS` (30), `PROOF_CALL_DEADLINE_MS` (45000), `PROOF_LEASE_SECONDS` (90; must exceed the call deadline by 15 s), `AUDIT_FULL_VERIFY_HOURS` (24, 0 disables), `HEALTH_MAX_AGE_SECONDS` (120), `WORKER_OPS_PORT` (4100, `off` disables), `WORKER_OPS_HOST` (127.0.0.1), `LOG_LEVEL`.
+
 The browser API URL defaults to localhost:4000. For hosting, set `NEXT_PUBLIC_API_URL` before the web build. Set `WEB_ORIGIN` to the exact frontend origin and `COOKIE_SECURE=true`; use HTTPS and a same-site frontend/API deployment. If the API sits behind a reverse proxy or CDN, set `TRUST_PROXY` to the number of trusted proxy hops (1–5); otherwise every visitor shares the proxy's address and the login limiter locks everyone out together. Leave it unset when the API is reached directly, so forwarded headers cannot be spoofed. No hosting resources have been provisioned.
 
 ## Verification

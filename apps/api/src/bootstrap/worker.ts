@@ -1,21 +1,37 @@
 import {connectDatabase} from './database.js';
 import {auditKeyFromEnvironment} from '../kernel/audit-key.js';
-import {runChainCycle} from '../modules/chain/application/worker.js';
+import {createLogger} from '../kernel/logger.js';
+import {Metrics} from '../kernel/metrics.js';
 import {amoyFromEnvironment} from '../modules/chain/infrastructure/evm.js';
-if(!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
-const database=connectDatabase(process.env.DATABASE_URL,auditKeyFromEnvironment()),chain=await amoyFromEnvironment();
-let stopped=false;
-for(const signal of ['SIGINT','SIGTERM']) process.on(signal,()=>{stopped=true;});
+import {policyFromEnvironment} from '../modules/chain/application/policy.js';
+import {declareWorkerMetrics,newHealthState,nextSleepMs,workerCycle} from '../modules/ops/application/iteration.js';
+import {startOpsServer,type OpsServer} from './ops-server.js';
+const log=createLogger('greenchain-worker');
+function integer(name:string,fallback:number,min:number,max:number){
+  const raw=process.env[name];if(raw===undefined||raw==='')return fallback;
+  const value=Number(raw);
+  if(!Number.isInteger(value)||value<min||value>max)throw new Error(`${name} must be an integer from ${min} to ${max}`);
+  return value;
+}
+// Configuration errors are fatal and loud at startup; once running, no single cycle may take the process down.
+let database:ReturnType<typeof connectDatabase>|undefined,chain:Awaited<ReturnType<typeof amoyFromEnvironment>>,ops:OpsServer|undefined;
 try {
-  while(!stopped) {
-    await runChainCycle(database.db,chain);
-    const result=await database.db.transaction(async tx=>{
-      const job=(await tx.query('SELECT id FROM jobs WHERE processed_at IS NULL ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1')).rows[0];
-      if(!job) return false;
-      // Foundation consumer only: delivery receipt, no MRV or verification claim.
-      await tx.query('UPDATE jobs SET processed_at=now() WHERE id=$1',[job.id]);
-      return true;
-    });
-    if(!result) await new Promise(resolve=>setTimeout(resolve,1000));
+  if(!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
+  const policy=policyFromEnvironment(),fullVerifyHours=integer('AUDIT_FULL_VERIFY_HOURS',24,0,24*30),maxAgeSeconds=integer('HEALTH_MAX_AGE_SECONDS',120,10,3600);
+  const opsSetting=process.env.WORKER_OPS_PORT??'4100',opsPort=opsSetting==='off'?0:integer('WORKER_OPS_PORT',4100,1,65535);
+  database=connectDatabase(process.env.DATABASE_URL,auditKeyFromEnvironment());chain=await amoyFromEnvironment();
+  const metrics=new Metrics(),health=newHealthState('worker');declareWorkerMetrics(metrics);
+  if(opsPort)ops=await startOpsServer({port:opsPort,host:process.env.WORKER_OPS_HOST??'127.0.0.1',metrics,health,maxAgeMs:maxAgeSeconds*1000});
+  let stopped=false,wake:(()=>void)|undefined;
+  for(const signal of ['SIGINT','SIGTERM']) process.on(signal,()=>{stopped=true;wake?.();});
+  log.info({chainConfigured:Boolean(chain),opsPort:ops?.port??null,fullVerifyHours,policy},'Worker started');
+  while(!stopped){
+    const outcome=await workerCycle({db:database.db,chain,log,metrics,health,fullVerifyEveryMs:fullVerifyHours*3_600_000,cycle:{policy}});
+    const sleep=nextSleepMs(outcome,health.consecutiveFailures);
+    if(!stopped)await new Promise<void>(resolve=>{const timer=setTimeout(resolve,sleep);wake=()=>{clearTimeout(timer);resolve();};});
   }
-} finally {chain?.close();await database.close();}
+  log.info({},'Worker stopping');
+} catch (error) {
+  log.error({message:error instanceof Error?error.message:'Unknown error'},'Worker could not start or hit a fatal configuration error');
+  process.exitCode=1;
+} finally {await ops?.close();chain?.close();await database?.close();}

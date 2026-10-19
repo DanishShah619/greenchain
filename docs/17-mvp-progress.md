@@ -67,6 +67,13 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
 - Final workspace type checks and production builds passed. Live issuance/audit checks confirmed two unique demo units, 11 newly signed case events and a queued proof intent; the 33-event chain (22 historical backfills) remained verified after restart. The updated PWA and all 27 precache assets are served on localhost.
 - Next product slice is buyer allocation and simulated purchase/payment, followed by ledger/payouts and certificates. Manual phone/PWA checks remain deferred by request.
 
+## Audit hardening slice
+
+- Versioned migrations replace the re-run schema statements (legacy databases are baselined automatically as `0001`). New guards: `review_decisions` are immutable, `demo_credits` follow an enforced status-transition graph, and a proof's `status` must match its columns (CHECK).
+- Audit verification is incremental from a stored checkpoint (cost proportional to new events, no 10,000-event ceiling), takes no part in the request path or the chaining transaction, and case audit responses no longer expose global sequence, head or counts. A full streamed re-verification runs on a schedule and on demand.
+- The worker logs structured JSON, exposes `/healthz` and `/metrics`, writes a heartbeat, survives pool and cycle errors, and retries failed proofs with bounded backoff into a `FAILED` state that an operator requeues.
+- Real-Postgres concurrency tests: see the integration-suite entry once Docker is available.
+
 ## Remaining release work
 
 This does not complete week 1 or the public release gate: hosted staging, deployed PostgreSQL checks, phone OTP, production role/device policies, versioned migrations, private object storage, cross-plot spatial checks and operational hardening remain. Offline shell behaviour is implemented and covered by automated worker/storage tests; real-device verification is still pending. Evidence approval does not make a credit or MRV/calculation-verification claim.
