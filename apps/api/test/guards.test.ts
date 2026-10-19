@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {migratedPglite} from './support/pglite.js';
-import {seedIssuedBatch,seedQueuedProof} from './support/seed.js';
+import {seedIssuedBatch,seedQueuedProof,reserveCredit,releaseCredit} from './support/seed.js';
 test('a recorded verifier decision cannot be changed or deleted',async()=>{
   const {pg,db}=await migratedPglite();
   try{
@@ -20,12 +20,12 @@ test('credits move only along the legal lifecycle and keep their identity',async
     const move=(id:string,state:string)=>db.query('UPDATE demo_credits SET state=$2 WHERE id=$1',[id,state]);
     const state=async(id:string)=>(await db.query('SELECT state FROM demo_credits WHERE id=$1',[id])).rows[0].state;
     // Legal path: AVAILABLE -> RESERVED -> SOLD -> RETIRED, and a released reservation returns to AVAILABLE.
-    await move(a,'RESERVED');await move(a,'SOLD');await move(a,'RETIRED');assert.equal(await state(a),'RETIRED');
-    await move(b,'RESERVED');await move(b,'AVAILABLE');assert.equal(await state(b),'AVAILABLE');
+    await reserveCredit(db,seed,a);await move(a,'SOLD');await move(a,'RETIRED');assert.equal(await state(a),'RETIRED');
+    await reserveCredit(db,seed,b);await releaseCredit(db,b);assert.equal(await state(b),'AVAILABLE');
     // Skipping a step, going backwards, and leaving a terminal state are all refused.
     await assert.rejects(move(c,'SOLD'),/illegal demo credit transition AVAILABLE -> SOLD/);
     await assert.rejects(move(c,'RETIRED'),/illegal/);
-    await move(c,'RESERVED');await move(c,'SOLD');
+    await reserveCredit(db,seed,c);await move(c,'SOLD');
     await assert.rejects(move(c,'AVAILABLE'),/illegal demo credit transition SOLD -> AVAILABLE/);
     await assert.rejects(move(c,'RESERVED'),/illegal/);
     await assert.rejects(move(a,'AVAILABLE'),/illegal demo credit transition RETIRED -> AVAILABLE/);

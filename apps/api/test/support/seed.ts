@@ -34,3 +34,21 @@ export async function seedQueuedProof(db:Database,batchId:string){
   await db.query(`INSERT INTO demo_chain_proofs(event_id,batch_id,commitment,anchor_seq,anchor_hash) VALUES ($1,$2,'c',1,'a')`,[eventId,batchId]);
   return eventId;
 }
+/**
+ * Reserves one credit the way the application does: an order (RESERVED), an active hold, then the credit state.
+ * Returns the order id. Needed by tests that move credits through states now that the credit guard requires a matching hold.
+ */
+export async function reserveCredit(db:Database,seed:{scenario:string},creditId:string){
+  await db.query(`INSERT INTO users(id,scenario_id,role,password_hash) VALUES ('buyer-seed',$1,'buyer','x') ON CONFLICT DO NOTHING`,[seed.scenario]);
+  const orderId=randomUUID();
+  await db.query(`INSERT INTO demo_orders(id,scenario_id,buyer_id,request_id,request_hash,quantity,allocated_quantity,state,unit_price_paise,price_effective_from,commission_bps,principal_paise,payable_paise,reserved_until,allocated_at)
+    VALUES ($1,$2,'buyer-seed',$3,'h',1,1,'RESERVED',100000,now(),500,100000,100000,now()+interval '5 minutes',now())`,[orderId,seed.scenario,randomUUID()]);
+  await db.query(`INSERT INTO demo_order_items(order_id,scenario_id,credit_id,group_id,generation) SELECT $1,$2,c.id,b.capture_id,1 FROM demo_credits c JOIN demo_issuance_batches b ON b.id=c.batch_id WHERE c.id=$3`,[orderId,seed.scenario,creditId]);
+  await db.query(`UPDATE demo_credits SET state='RESERVED',reserved_order_id=$2 WHERE id=$1`,[creditId,orderId]);
+  return orderId;
+}
+/** Releases a reservation made by reserveCredit: deactivate the hold, then return the credit to AVAILABLE. */
+export async function releaseCredit(db:Database,creditId:string){
+  await db.query('UPDATE demo_order_items SET active=false WHERE credit_id=$1 AND active',[creditId]);
+  await db.query(`UPDATE demo_credits SET state='AVAILABLE',reserved_order_id=NULL WHERE id=$1`,[creditId]);
+}
