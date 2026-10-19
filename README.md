@@ -69,6 +69,18 @@ Tuning (all optional): `PROOF_MAX_FAILURES` (8), `PROOF_RETRY_BASE_SECONDS` (30)
 
 The browser API URL defaults to localhost:4000. For hosting, set `NEXT_PUBLIC_API_URL` before the web build. Set `WEB_ORIGIN` to the exact frontend origin and `COOKIE_SECURE=true`; use HTTPS and a same-site frontend/API deployment. If the API sits behind a reverse proxy or CDN, set `TRUST_PROXY` to the number of trusted proxy hops (1–5); otherwise every visitor shares the proxy's address and the login limiter locks everyone out together. Leave it unset when the API is reached directly, so forwarded headers cannot be spoofed. No hosting resources have been provisioned.
 
+### Integration tests on real PostgreSQL
+
+`npm test -w apps/api` uses in-process PGlite (one connection), which is fast but cannot show races between connections. `npm run test:pg -w apps/api` runs `apps/api/test/pg` against a real server with parallel connections: the evidence-upload quota (34 concurrent 2 MiB reservations admit exactly 32), competing and replayed calculation approvals (one batch), signer-lease claim and expiry fencing, concurrent audit appenders and chainers, and concurrent migrators. Each test file creates and drops its own throwaway database.
+
+```powershell
+docker compose up -d db                 # if host port 5432 is taken, first: $env:GREENCHAIN_DB_PORT = '5433'
+$env:TEST_DATABASE_URL = 'postgres://greenchain:local-demo-only@127.0.0.1:5432/postgres'   # use the same port as above
+npm run test:pg -w apps/api
+```
+
+An unset `TEST_DATABASE_URL` fails the suite on purpose. The URL needs permission to create databases; use only a server where that is acceptable.
+
 ## Verification
 
 ```powershell
