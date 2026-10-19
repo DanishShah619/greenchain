@@ -8,11 +8,12 @@ export function connectDatabase(url: string, auditKey?:Buffer) {
   const db: Database = {
     auditKey,
     query: async (sql, values) => pool.query(sql,values),
+    exec: async sql => {await pool.query(sql);},
     transaction: async work => {
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        const tx: Database = {auditKey,query: async (sql,values) => client.query(sql,values), transaction: () => {throw new Error('Nested transactions are prohibited');}};
+        const tx: Database = {auditKey,query: async (sql,values) => client.query(sql,values), exec: async sql => {await client.query(sql);}, transaction: () => {throw new Error('Nested transactions are prohibited');}};
         const result = await work(tx);
         await client.query('COMMIT');
         return result;

@@ -1,10 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID,createHash} from 'node:crypto';
-import {PGlite} from '@electric-sql/pglite';
 import sharp from 'sharp';
 import {buildApp} from '../src/bootstrap/app.js';
-import {schema} from '../src/kernel/schema.js';
+import {migratedPglite} from './support/pglite.js';
 import {hashPassword} from '../src/kernel/password.js';
 import type {Database} from '../src/kernel/database.js';
 import {runChainCycle} from '../src/modules/chain/application/worker.js';
@@ -41,8 +40,7 @@ test('proof queue survives uncertain sends, restart, confirmation loss and confl
   }finally{await f.close();}
 });
 async function fixture(){
-  const pg=new PGlite(),wrap=(client:{query:Function}):Database=>({auditKey:Buffer.alloc(32,7),query:async(sql,values)=>(await client.query(sql,values))as any,transaction:async work=>pg.transaction(async tx=>work(wrap(tx)))}),db=wrap(pg);
-  await pg.exec(schema);
+  const {pg,db}=await migratedPglite();
   await db.query("INSERT INTO scenarios(id) VALUES ('presenter'),('other')");
   await db.query("INSERT INTO demo_namespaces(scenario_id) VALUES ('presenter')");
   await db.query("INSERT INTO users(id,scenario_id,role,password_hash) VALUES ('presenter','presenter','agent',$1),('verifier','presenter','verifier',$1)",[hashPassword(password)]);

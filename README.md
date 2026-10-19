@@ -49,6 +49,10 @@ npm run worker
 
 Open http://localhost:3000. The API runs on http://localhost:4000. Public visitors see only seeded showcase captures. Sign in using the password set during initial setup, save an invented plot, then sync it. Refresh to confirm server persistence. Setup is repeatable and preserves existing captures and the original password.
 
+### Database migrations
+
+The schema is versioned SQL in `apps/api/migrations/NNNN_name.sql`, applied in order by `npm run db:setup` (or on its own with `npm run db:migrate -w apps/api`). Each run is one transaction behind an advisory lock, so two hosts starting together are safe and a failed migration changes nothing. Applied files are checksummed: editing one after it ran is refused, so a schema change is always a **new** numbered file. A database created before migrations existed (all expected tables present, no history) is recorded as already at `0001` and then brought up to date; a half-built one is refused with `LEGACY_SCHEMA_INCOMPLETE`. A database newer than the code (`MIGRATION_UNKNOWN_APPLIED`) is also refused. Migrations are forward-only; take a backup before applying one to anything that matters. `CREATE INDEX CONCURRENTLY` and other non-transactional DDL are not supported by the runner.
+
 The browser API URL defaults to localhost:4000. For hosting, set `NEXT_PUBLIC_API_URL` before the web build. Set `WEB_ORIGIN` to the exact frontend origin and `COOKIE_SECURE=true`; use HTTPS and a same-site frontend/API deployment. If the API sits behind a reverse proxy or CDN, set `TRUST_PROXY` to the number of trusted proxy hops (1–5); otherwise every visitor shares the proxy's address and the login limiter locks everyone out together. Leave it unset when the API is reached directly, so forwarded headers cannot be spoofed. No hosting resources have been provisioned.
 
 ## Verification

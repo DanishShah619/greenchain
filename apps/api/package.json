@@ -5,6 +5,7 @@
   "scripts": {
     "demo:local": "node --env-file-if-exists=../../.env --import tsx scripts/local-demo.ts",
     "dev": "node --env-file=../../.env --import tsx src/bootstrap/server.ts",
+    "db:migrate": "node --env-file=../../.env --import tsx src/bootstrap/migrate.ts",
     "db:setup": "node --env-file=../../.env --import tsx src/bootstrap/setup.ts",
     "worker": "node --env-file=../../.env --import tsx src/bootstrap/worker.ts",
     "contracts:compile": "node scripts/compile-contract.mjs",

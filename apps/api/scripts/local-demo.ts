@@ -4,7 +4,7 @@ import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import {randomBytes} from 'node:crypto';
 import {resolve} from 'node:path';
 import {buildApp} from '../src/bootstrap/app.js';
-import {schema} from '../src/kernel/schema.js';
+import {migrate} from '../src/kernel/migrate.js';
 import {hashPassword} from '../src/kernel/password.js';
 import type {Database} from '../src/kernel/database.js';
 import {runChainCycle} from '../src/modules/chain/application/worker.js';
@@ -29,13 +29,14 @@ const verifierPath=resolve(folder,'verifier-password.txt');
 let verifierPassword:string;
 try{verifierPassword=(await readFile(verifierPath,'utf8')).trim();}
 catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;verifierPassword=randomBytes(24).toString('base64url');await writeFile(verifierPath,verifierPassword+'\n',{flag:'wx'});}
-const wrap=(client:{query:Function}):Database=>({
+const wrap=(client:{query:Function;exec:Function}):Database=>({
   auditKey,
   query:async(sql,values)=>(await client.query(sql,values)) as any,
+  exec:async sql=>{await client.exec(sql);},
   transaction:async work=>pg.transaction(async tx=>work(wrap(tx)))
 });
-await pg.exec(schema);
 const db=wrap(pg);
+await migrate(db);
 await db.transaction(async tx=>{
   await tx.query("INSERT INTO scenarios(id) VALUES ('showcase'),('presenter') ON CONFLICT DO NOTHING");
   await tx.query("INSERT INTO demo_namespaces(scenario_id) VALUES ('presenter') ON CONFLICT DO NOTHING");

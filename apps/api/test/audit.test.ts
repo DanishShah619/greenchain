@@ -1,15 +1,12 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
-import {PGlite} from '@electric-sql/pglite';
-import {schema} from '../src/kernel/schema.js';
-import type {Database} from '../src/kernel/database.js';
+import {migratedPglite} from './support/pglite.js';
 import {capture} from '../src/modules/capture/application/capture.js';
 import {chainAudit,verifyAudit} from '../src/modules/audit/application/audit.js';
 import {claimSigner,withFence} from '../src/modules/chain/application/worker.js';
 async function fixture(){
-  const pg=new PGlite(),wrap=(client:{query:Function}):Database=>({auditKey:Buffer.alloc(32,7),query:async(sql,values)=>(await client.query(sql,values))as any,transaction:async work=>pg.transaction(async tx=>work(wrap(tx)))}),db=wrap(pg);
-  await pg.exec(schema);await db.query("INSERT INTO scenarios VALUES('demo')");
+  const {pg,db}=await migratedPglite();await db.query("INSERT INTO scenarios VALUES('demo')");
   const actor={id:'test-agent',scenarioId:'demo',role:'agent'},id=randomUUID();
   await capture(db,actor,{eventId:id,farmerLabel:'Synthetic private label',village:'Private village',areaHectares:'1.25',consent:true});
   return {pg,db,id};

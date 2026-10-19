@@ -1,19 +1,14 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {PGlite} from '@electric-sql/pglite';
 import {randomUUID} from 'node:crypto';
-import {schema} from '../src/kernel/schema.js';
+import {migratedPglite} from './support/pglite.js';
 import {hashPassword} from '../src/kernel/password.js';
 import {buildApp} from '../src/bootstrap/app.js';
 import {capture} from '../src/modules/capture/application/capture.js';
 import type {Database} from '../src/kernel/database.js';
 const origin='http://localhost:3000',password='test-only-password-12345';
 async function fixture(){
-  const pg=new PGlite();
-  const wrap=(client:{query:Function}):Database=>({auditKey:Buffer.alloc(32,7),query:async(sql,values)=>(await client.query(sql,values)) as any,
-    transaction:async work=>pg.transaction(async tx=>work(wrap(tx)))});
-  const db=wrap(pg);
-  await pg.exec(schema);
+  const {pg,db}=await migratedPglite();
   await db.query("INSERT INTO scenarios VALUES ('presenter'),('showcase'),('other')");
   await db.query("INSERT INTO users(id,scenario_id,role,password_hash) VALUES ('presenter','presenter','agent',$1)",[hashPassword(password)]);
   const app=await buildApp(db,{origin,secure:false});

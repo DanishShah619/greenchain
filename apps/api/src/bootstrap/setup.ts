@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {connectDatabase} from './database.js';
-import {schema} from '../kernel/schema.js';
+import {migrate} from '../kernel/migrate.js';
 import {hashPassword} from '../kernel/password.js';
 const password=process.env.DEMO_PRESENTER_PASSWORD;
 const verifierPassword=process.env.DEMO_VERIFIER_PASSWORD;
@@ -9,8 +9,9 @@ if(!verifierPassword||verifierPassword.length<16||verifierPassword===password)th
 if(!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
 const database=connectDatabase(process.env.DATABASE_URL);
 try {
+  const migrated=await migrate(database.db);
+  console.log(`Migrations ${migrated.applied.length?`applied: ${migrated.applied.join(', ')}`:'already current'}${migrated.baselined?' (existing database recorded as baseline 0001)':''}; schema version ${migrated.current}.`);
   await database.db.transaction(async tx=>{
-    await tx.query(schema);
     await tx.query("INSERT INTO scenarios(id) VALUES ('showcase'),('presenter') ON CONFLICT DO NOTHING");
     await tx.query("INSERT INTO demo_namespaces(scenario_id) VALUES ('presenter') ON CONFLICT DO NOTHING");
     await tx.query("INSERT INTO users(id,scenario_id,role,password_hash) VALUES ('presenter','presenter','agent',$1) ON CONFLICT DO NOTHING",[hashPassword(password)]);
