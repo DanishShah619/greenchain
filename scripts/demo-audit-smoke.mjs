@@ -11,9 +11,10 @@ try{
   assert.ok(found,'An issued demo case is available');
   for(let i=0;i<20&&!found.inventory.proof;i++){await new Promise(r=>setTimeout(r,500));found.inventory=await call(`/cases/${found.id}/demo-issuance`);}
   const detail=await call(`/cases/${found.id}/audit`),proof=found.inventory.proof;
-  assert.equal(detail.audit.status,'VERIFIED');assert.ok(BigInt(detail.audit.sequence)>0n);assert.equal(detail.audit.pending,0);
+  assert.equal(detail.audit.status,'VERIFIED');assert.ok(detail.audit.caseEvents.total>0);assert.equal(detail.audit.caseEvents.verified,detail.audit.caseEvents.total);
+  for(const global of ['sequence','headHash','pending','legacyBackfilled','confirmedAnchors'])assert.ok(!(global in detail.audit),`${global} must not be exposed to a case reader`);
   assert.ok(proof);assert.match(proof.commitment,/^[a-f0-9]{64}$/);assert.match(proof.anchor_hash,/^[a-f0-9]{64}$/);assert.ok(BigInt(proof.anchor_seq)>0n);
   assert.ok(detail.events.every(e=>e.chain_seq));assert.equal(new Set(detail.events.map(e=>e.id)).size,detail.events.length);
   const denied=await fetch(base+`/cases/${found.id}/audit`);assert.equal(denied.status,401);
-  console.log(JSON.stringify({audit:detail.audit.status,committedEvents:detail.audit.sequence,legacyBackfilled:detail.audit.legacyBackfilled,caseEvents:detail.events.length,proofStatus:found.inventory.proofStatus,commitmentQueued:Boolean(proof),privateReadProtected:true}));
+  console.log(JSON.stringify({audit:detail.audit.status,verifiedCaseEvents:detail.audit.caseEvents.verified,caseEvents:detail.events.length,proofStatus:found.inventory.proofStatus,commitmentQueued:Boolean(proof),privateReadProtected:true}));
 }finally{await fetch(base+'/session',{method:'DELETE',headers});}

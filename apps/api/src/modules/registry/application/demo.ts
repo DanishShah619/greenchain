@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import type {Database} from '../../../kernel/database.js';
-import {appendAudit,verifyAudit} from '../../audit/application/audit.js';
+import {appendAudit,caseAudit} from '../../audit/application/audit.js';
 import type {Actor} from '../../capture/application/capture.js';
 import {WorkflowError} from '../../../kernel/errors.js';
 import {splitIssuance} from '../domain/quantities.js';
@@ -29,7 +29,7 @@ export async function inventory(db:Database,actor:Actor,id:string,after:number,a
   const credits=(await db.query('SELECT id,ordinal,quantity,state FROM demo_credits WHERE batch_id=$1 AND ordinal>$2 ORDER BY ordinal LIMIT 50',[batch.id,after])).rows;
   const last=credits.at(-1)?.ordinal??after;
   const proof=(await db.query(`SELECT status,commitment,anchor_seq,anchor_hash,network,contract_address,transaction_hash,block_number,confirmations,last_error FROM demo_chain_proofs WHERE batch_id=$1`,[batch.id])).rows[0]??null;
-  const audit=await verifyAudit(db);
+  const audit=await caseAudit(db,actor.scenarioId,id);
   const configured=Boolean(process.env.AMOY_RPC_URL&&process.env.AMOY_CONTRACT_ADDRESS&&process.env.AMOY_SIGNER_KEY_FILE&&process.env.AMOY_CONTRACT_CODE_HASH);
   return {batch,credits,nextAfter:last<batch.credit_count?last:null,proofStatus:!configured&&(!proof||proof.status==='QUEUED')?'NOT_CONFIGURED':proof?.status??'QUEUED',proof,audit};
 }
