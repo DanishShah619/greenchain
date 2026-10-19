@@ -1,0 +1,21 @@
+{
+  "name": "@greenchain/geometry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.mjs"
+    }
+  },
+  "scripts": {
+    "test": "node --test test.mjs",
+    "typecheck": "node --check index.mjs",
+    "build": "node --check index.mjs"
+  },
+  "dependencies": {
+    "@turf/area": "7.4.0",
+    "@turf/kinks": "7.4.0"
+  }
+}

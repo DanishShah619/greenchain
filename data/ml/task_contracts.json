@@ -1,0 +1,28 @@
+{
+  "status": "candidate_task_contracts_no_model_trained_no_holdout_frozen",
+  "survey_yield": {
+    "path": "prepared/west_bengal_rice_management_2018.csv",
+    "target": "yield_t_ha",
+    "target_units": "tonnes_grain_per_hectare_source_reported",
+    "label_quality": "self_reported_not_crop_cut",
+    "task": "retrospective_auxiliary_management_yield_research",
+    "supported_context": "surveyed_West_Bengal_Kharif_rice_2018_only",
+    "feature_allowlist": ["soilTexture", "drainClass", "prevCrop", "prevCropTillage", "cropResiduePcnt", "residueBurnt", "varType", "varName", "LandPrep", "CropEst", "FYM", "applyMineralFert", "irrigAvail", "irrigSource", "irrigTimes", "total_N_ha", "total_p_ha", "total_K_ha"],
+    "group_field": "split_group_id",
+    "exclude": ["L.tonPerHectare", "record_id", "district", "yield_nonpositive_or_missing", "yield_outside_exploratory_range", "feature_target_duplicate_candidate", "cropCutDone"],
+    "gates": ["audit nutrient definitions and units", "resolve exact/near duplicate groups", "review sparse districts and repeated farms", "freeze grouped split", "independent labels needed for practice-verification task"],
+    "not_permitted": ["carbon removal prediction", "practice truth classification", "early-season deployment without cutoff-compatible features", "automatic farming advice"]
+  },
+  "rice_gas_research": {
+    "path": "prepared/west_bengal_rice_emissions_study_extracts.csv",
+    "transfer_path": "prepared/india_rice_emissions_meta_analysis.csv",
+    "targets": ["CH4", "N2O"],
+    "target_units": "source_meta_analysis_kg_gas_per_hectare_per_experimental_season_pending_original_study_mass_basis_audit",
+    "feature_allowlist": ["ClC", "PhT", "SoC", "Sea", "FaS", "TiM", "GrD", "PlM", "WaR", "Nitrogen", "NiA", "Pho", "Pot", "FirT", "CoMa", "ReM", "ReQ"],
+    "group_fields": ["StudyID", "leakage_group"],
+    "excluded_feature_families": ["target gases", "GWP", "GHGI", "GY", "all SD/SE outcomes", "StudyID", "ES_ID", "Cite", "Title", "source_record_id", "duplicate flags"],
+    "gates": ["verify units/coding against original studies", "audit imputed variance/replication and digitised values", "reconcile study/trial overlap", "freeze study-grouped split and independent local validation"],
+    "not_permitted": ["SOC change training", "claiming 108 independent plots", "random row split as independent validation", "real credit issuance"]
+  },
+  "uncollected_targets": ["independently labelled phone photographs", "paired SOC stock-change observations", "paired plot satellite histories with independent practice observations"]
+}

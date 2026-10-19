@@ -1,0 +1,32 @@
+{
+  "name": "greenchain",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/api",
+    "apps/web",
+    "packages/*"
+  ],
+  "scripts": {
+    "demo:api": "npm run demo:local -w apps/api",
+    "preview:web": "npm run preview -w apps/web",
+    "dev:api": "npm run dev -w apps/api",
+    "dev:web": "npm run dev -w apps/web",
+    "db:setup": "npm run db:setup -w apps/api",
+    "worker": "npm run worker -w apps/api",
+    "test": "npm run test --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "build": "npm run build --workspaces"
+  },
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "overrides": {
+    "solc": {
+      "tmp": "0.2.7"
+    }
+  },
+  "devDependencies": {
+    "solc": "0.8.37"
+  }
+}

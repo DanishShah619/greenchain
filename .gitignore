@@ -1,0 +1,17 @@
+# Local research dependencies and private/temporary source data.
+.research-deps/
+data/ml/raw/
+data/ml/prepared/
+*.part
+__pycache__/
+node_modules/
+.next/
+out/
+dist/
+.local/
+.env
+*.tsbuildinfo
+
+# Local tool state (machine-specific or scratch; not part of the product)
+.claude/settings.local.json
+.adversarial-review/

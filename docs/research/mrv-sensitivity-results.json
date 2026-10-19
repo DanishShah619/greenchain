@@ -1,0 +1,41 @@
+{
+  "status": "synthetic_structural_analysis_not_prediction_validation",
+  "area_ha": "1.25",
+  "placeholder_factor_tCO2e_per_ha_per_cycle": "1.20",
+  "placeholder_delta_ref": "0.20",
+  "cases": [
+    {
+      "case": "greenness_increase",
+      "ndvi_project": "0.62",
+      "ndvi_baseline": "0.50",
+      "multiplier": "0.6",
+      "practice_only_tCO2e_per_cycle": "1.5000",
+      "experimental_formula_tCO2e_per_cycle": "0.90000",
+      "measured_SOC_change": null
+    },
+    {
+      "case": "unchanged_greenness",
+      "ndvi_project": "0.50",
+      "ndvi_baseline": "0.50",
+      "multiplier": "0",
+      "practice_only_tCO2e_per_cycle": "1.5000",
+      "experimental_formula_tCO2e_per_cycle": "0.0000",
+      "measured_SOC_change": null
+    },
+    {
+      "case": "greenness_decrease",
+      "ndvi_project": "0.40",
+      "ndvi_baseline": "0.50",
+      "multiplier": "0",
+      "practice_only_tCO2e_per_cycle": "1.5000",
+      "experimental_formula_tCO2e_per_cycle": "0.0000",
+      "measured_SOC_change": null
+    }
+  ],
+  "findings": [
+    "Identical area/practice inputs give different amounts solely through greenness.",
+    "Unchanged/decreased greenness forces zero; correctness requires independent observations.",
+    "The practice-only comparator is experimental too, not a measured carbon benefit.",
+    "No field measurements, uncertainty calibration or prediction accuracy are claimed."
+  ]
+}

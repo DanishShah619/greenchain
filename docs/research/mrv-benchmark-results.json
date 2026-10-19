@@ -1,0 +1,27 @@
+{
+  "status": "published_table_arithmetic_only_not_prediction_validation",
+  "source_doi": "https://doi.org/10.1111/sum.12331",
+  "inputs": {
+    "treatment_delta_t_C_per_ha_over_7_years": "4.66",
+    "control_delta_t_C_per_ha_over_7_years": "-0.90",
+    "years": "7",
+    "hypothetical_area_ha": "1.25"
+  },
+  "derived": {
+    "absolute_t_CO2_per_ha_per_year": "2.440952",
+    "control_relative_t_CO2_per_ha_per_year": "2.912381",
+    "absolute_t_CO2_per_year_for_hypothetical_area": "3.051190",
+    "control_relative_t_CO2_per_year_for_hypothetical_area": "3.640476"
+  },
+  "checks": {
+    "two_arithmetic_routes_agree": true
+  },
+  "uncertainty_interval": null,
+  "prediction_error_metrics": null,
+  "limitations": [
+    "Annualised seven-year averages, not per-crop factors or guaranteed annual rates.",
+    "SOC-related CO2 conversion only; not a complete net-GHG credit calculation.",
+    "No paired NDVI inputs, expert-agreed error threshold or independent holdout evaluation.",
+    "Do not use these outputs as approved production factors."
+  ]
+}

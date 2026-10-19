@@ -1,0 +1,4 @@
+# Install into a workspace-local target; do not modify the bundled runtime.
+pyreadr==0.5.7
+narwhals==2.27.1
+# pandas/numpy versions used for this collection are recorded in data_quality_report.json.

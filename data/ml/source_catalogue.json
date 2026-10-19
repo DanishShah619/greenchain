@@ -1,0 +1,65 @@
+{
+  "collected_date": "2026-10-13",
+  "sources": [
+    {
+      "dataset_id": "nayak_2024_rice_management",
+      "title": "Context-dependent agricultural intensification pathways to increase rice production in India",
+      "source_doi": "10.1038/s41467-024-52448-6",
+      "source_url": "https://www.nature.com/articles/s41467-024-52448-6",
+      "download_url": "https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41467-024-52448-6/MediaObjects/41467_2024_52448_MOESM4_ESM.zip",
+      "retrieved_date": "2026-10-13",
+      "licence": "CC BY 4.0; inspect supplementary notices before derived release",
+      "licence_url": "https://creativecommons.org/licenses/by/4.0/",
+      "local_path": "data/ml/raw/nayak_2024/supplementary_data_1_2.zip",
+      "sha256": "22152e70566143a196c26660af445c7f4c0a3b342045baaa277d96ee94db63af",
+      "bytes": 85458275,
+      "archive_members": [
+        {
+          "name": "Data/all_year_data.RData",
+          "bytes": 4112219
+        },
+        {
+          "name": "Data/Data_for_script_3.RData",
+          "bytes": 83188335
+        },
+        {
+          "name": "Data/Note.txt",
+          "bytes": 230
+        }
+      ],
+      "origin": "PUBLISHED_FIELD_SURVEY_AND_DERIVED_DATA",
+      "readiness": "SEE data/ml/data_quality_report.json FOR CURATED_EXPORT",
+      "not_carbon_ground_truth": true,
+      "source_archive_retention": "REMOVED_AFTER_PRIVACY_AUDIT; original checksum retained",
+      "removed_temporary_sources": [
+        "supplementary_data_1_2.zip",
+        "all_year_data.RData",
+        "Data_for_script_3.RData"
+      ],
+      "manifest_path": "data/ml/raw/nayak_2024/source_manifest.json"
+    },
+    {
+      "dataset_id": "thai_2026_rice_emissions",
+      "source_doi": "10.6084/m9.figshare.29817482.v1",
+      "source_url": "https://doi.org/10.6084/m9.figshare.29817482.v1",
+      "metadata_url": "https://api.figshare.com/v2/articles/29817482",
+      "download_url": "https://ndownloader.figshare.com/files/56877194",
+      "retrieved_date": "2026-10-13",
+      "licence": {
+        "value": 1,
+        "name": "CC BY 4.0",
+        "url": "https://creativecommons.org/licenses/by/4.0/"
+      },
+      "local_path": "data/ml/raw/thai_2026/data_Full.csv",
+      "sha256": "86a5e916bdd02950f5de64c6055703e3c151ac32c8c5fa6db387849482fa2805",
+      "md5_repository_verified": "2090428ace3217857cd10c15cb36bf16",
+      "bytes": 2646181,
+      "origin": "PUBLISHED_STUDY_EXTRACTED_EXPERIMENTS",
+      "readiness": "DOWNLOADED_PENDING_SCHEMA_AND_LOCAL_APPLICABILITY_AUDIT",
+      "not_SOC_change_ground_truth": true,
+      "manifest_path": "data/ml/raw/thai_2026/source_manifest.json"
+    }
+  ],
+  "prepared_data_report": "data_quality_report.json",
+  "model_training_performed": false
+}
