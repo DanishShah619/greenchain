@@ -1,6 +1,6 @@
 # Demo buyer purchase slice: marketplace, reservation, simulated payment, fulfilment
 
-Status: **Proposed, awaiting sign-off (2026-10-19). Nothing in this document is implemented.** Scope: the demo subset of [06 §4.2 and §6](06-technical-design.md), [09](09-pricing-invoicing-design.md) and [14](14-company-buyer-flow.md), under the delivery limits of [13](13-public-demo-plan.md). Where this slice is simpler than the production design, §10 lists the deviation and the trigger that removes it. Rigor tier: money-adjacent but synthetic (simulated payments, no real users); the production invariants for double-sale and duplicate callbacks still apply in full, because they are the point of the demonstration.
+Status: **Revision 2, proposed, awaiting sign-off (2026-10-19).** Revision 2 folds in an independent design review (`backend-design:component-architect`) that found defects in revision 1; §14 lists them. Nothing in this document is implemented. Scope: the demo subset of [06 §4.2 and §6](06-technical-design.md), [09](09-pricing-invoicing-design.md) and [14](14-company-buyer-flow.md), under the delivery limits of [13](13-public-demo-plan.md). Where this slice is simpler than the production design, §10 lists the deviation and the trigger that removes it. Rigor tier: money-adjacent but synthetic (simulated payments, no real users); the production invariants for double-sale and duplicate callbacks still apply in full, because they are the point of the demonstration.
 
 ## 1. Goal and non-goals
 
@@ -8,178 +8,227 @@ Status: **Proposed, awaiting sign-off (2026-10-19). Nothing in this document is 
 
 **Non-goals (deferred, not stubbed):** payouts, earnings statements and farmer-facing views; the double-entry journal and reversal reserve (doc 11); invoices and tax (an explicit zero-tax demo rule is recorded on each order); retirement and certificates; disputes and freezing; real payment provider; company registration; multiple credit types; vintage and state filters.
 
-## 2. Decisions this spec makes (override at sign-off)
+## 2. Decisions this spec makes
+
+Confirmed by the user on 2026-10-19: **B10, B11, B12**. The others are proposals; override at sign-off.
 
 | # | Decision | Reason |
 |---|---|---|
 | B1 | New role `buyer` (users CHECK widened by migration). A buyer belongs to one scenario and sees only that scenario's credits. | Existing roles are `agent` and `verifier`; buyer must be denied on every existing route (tested). |
 | B2 | **Payee group = farmer case** (`capture_id` of the issuance batch). | The registry has no payee nomination yet; one batch per case already exists. |
-| B3 | **Single credit type, flat price from an effective-dated price list** (`demo_price_list`, insert-only, price per credit in paise). No vintage/state keys. | Keeps the "effective-dated" requirement of doc 09 §4 without the full price-book. |
-| B4 | Allocation is **FCAE v0**: the documented algorithm with every tier weight equal to 1 (no FRPS tiers exist yet). Cap `max(1, ⌊0.15·Q⌋)`, reservation quota `max(1, ⌊0.5·(a+r)⌋)`, waiting-days ordering, deterministic tie-break on group id. | Behaviour matches doc 06 §6 so the tier weight can be added later without changing the contract. |
-| B5 | Concurrency control is **the scenario row lock** (`SELECT … FROM scenarios WHERE id=$1 FOR UPDATE`), the same device `beginUpload` uses, then order row, then credit rows in ascending id. | One type per scenario makes a per-type advisory lock equivalent and simpler; proven pattern in this codebase. |
-| B6 | Aggregates are **recounted from `demo_credits`**, not maintained (`farmer_available`). | Demo scale (hundreds of credits); removes a drift class. Revisit at 10k+ credits. |
-| B7 | Money is `bigint` paise; commission is `DEMO_COMMISSION_BPS` (default 500) snapshotted on the order and applied **per credit** with round-half-even (doc 09 §5). | Same rules as production. |
-| B8 | Time comes from the database clock; every function takes an optional `asOf`, and tests move time by writing `expires_at`, as the worker tests already do. | No hidden global clock. |
-| B9 | The payment provider is a **port** with a deterministic simulator. Its webhook goes through the same handler a real adapter would use and is **HMAC-signed** (`PAYMENT_WEBHOOK_SECRET`); the presenter's "simulate" controls call the simulator, which signs and posts exactly like a provider. | Demo plan §"Real behaviour": simulation must exercise the real handlers. |
+| B3 | **Single credit type, flat price from an effective-dated price list** (`demo_price_list`, insert-only, price per credit in paise). | Keeps the "effective-dated" requirement of doc 09 §4 without the full price-book. |
+| B4 | Allocation is **FCAE v0**: the documented algorithm with every tier weight equal to 1. Cap `max(1, ⌊0.15·Q⌋)`, quota `max(1, ⌊0.5·(a+r)⌋)`, waiting-days ordering, deterministic tie-break. | Same contract as doc 06 §6, so the tier weight can be added later. |
+| B5 | Concurrency control is **one scenario row lock** taken through a single helper `withScenarioLock`; raw `FOR UPDATE` on market tables is not allowed outside it. Lock order everywhere: scenario row → order rows ascending id → payment-attempt rows → credit rows ascending id. | Same device as `beginUpload`; one helper makes the order impossible to get wrong. |
+| B6 | Aggregates are **recounted from `demo_credits`**, not maintained. | Demo scale; removes a drift class. |
+| B7 | Money is `bigint` paise. Commission (`DEMO_COMMISSION_BPS`, default 500, snapshotted on the order) is computed **in TypeScript BigInt, per credit, round-half-even**. | Postgres `round` is half-away-from-zero; doc 09 §5 requires half-even. |
+| B8 | `asOf` is `clock_timestamp()` read **once, after the scenario lock is acquired**, and passed down. Tests move time by writing `expires_at`/`reserved_until`. | `now()` is the transaction start, which is stale after a lock wait. |
+| B9 | The payment provider is a **port** with a deterministic simulator. Its events go through the same `handlePaymentEvent` a real adapter would use, HMAC-signed. | Demo plan §"Real behaviour". |
+| B10 | **Late success after a buyer cancel fulfils the order** (via REVALIDATING, all-or-nothing on the same credits), because the payment is real. If the credits are gone, refund. | User decision. |
+| B11 | **The per-buyer limit stays**: at most 3 open orders and at most 10% of *eligible supply* (AVAILABLE + RESERVED credits at order time) reserved at once. Over the limit is a distinct `422 BUYER_LIMIT`, not a shortfall reason. With the 200-credit seed the effective maximum order is about 20; the seed and docs say so. | User decision. |
+| B12 | **Audit anchor:** market audit events attach to a case. Order and payment events use the capture of the batch of the order's first credit (lowest credit id) as `capture_id`; the entity is named in the payload (`order:<id>`). System actors (webhook, reaper) use actor id `system:market` with scenario from the order. No schema change to `audit_events`. | User decision. |
 
 ## 3. Roles and visibility
 
 | Actor | Can | Cannot |
 |---|---|---|
-| Buyer | list inventory summary; quote; create order; start/cancel a payment attempt; read **own** orders, purchases and receipts | see farmer label, village, plot, evidence, other buyers' orders, other scenarios; call agent/verifier routes |
+| Buyer | list inventory summary; create order; accept a partial fill; start/cancel a payment attempt or order; read **own** orders and ledger lines | see farmer label, village, plot, evidence, other buyers' orders, other scenarios; call agent/verifier routes |
 | Agent / Verifier | unchanged | any buyer route (403) |
-| Presenter (agent account) | trigger simulator outcomes for an order in its own scenario | affect orders of another scenario |
+| Presenter (agent account) | trigger simulator outcomes for orders in its own scenario | affect orders of another scenario |
 | Showcase (public) | read-only sample inventory counts | any write |
 
-The marketplace shows **pseudonymous group labels** (`Group 07`), the credit count, vintage, price, and the provenance link (batch and calculation IDs). It never shows names, villages or exact areas. Order ownership is `orders.buyer_id` from the session, never from the request body.
+The marketplace shows **pseudonymous group labels** (`Group 07`), counts, vintage, price and provenance (batch and calculation IDs); never names, villages or areas. Order ownership is `orders.buyer_id` from the session. Other buyers' or scenarios' ids return **404**, never 403.
 
 ## 4. State machines
 
-**Credit** (existing guard from migration `0002`; no change): `AVAILABLE → RESERVED → SOLD`, and `RESERVED → AVAILABLE` on release. `SOLD → RETIRED` and `REVERSED` are out of scope here.
+**Credit** (guard from `0002`, extended in `0005`): `AVAILABLE → RESERVED → SOLD`, `RESERVED → AVAILABLE`. `0005` replaces `guard_demo_credit` (`CREATE OR REPLACE`, existing body kept) so that moving to `SOLD` requires the owning order to be `RESERVED`, `AWAITING_PAYMENT` or `REVALIDATING`. `RETIRED`/`REVERSED` stay out of scope.
 
 **Order**
 
 ```
-CREATED ─allocate─► RESERVED ─attempt created─► AWAITING_PAYMENT ─attempt SUCCEEDED (owns credits)─► FULFILLED
-   │ shortfall: buyer declines → CANCELLED        │ cancel / reservation lapses → EXPIRED / CANCELLED
-   │                                              └─ SUCCEEDED but credits no longer owned ─► REVALIDATING ─all free─► FULFILLED
-                                                                                         └─ otherwise ─► REFUND_PENDING ─► REFUNDED
+CREATED ──allocate OK──► RESERVED ──attempt created──► AWAITING_PAYMENT ──success, ownership intact──► FULFILLED
+   │ shortfall                │ cancel / lapse                 │ cancel / lapse
+   │ (no reservation)         ▼                                ▼
+   ▼                    CANCELLED / EXPIRED ──late success──► REVALIDATING ──all same credits free──► FULFILLED
+CANCELLED (buyer or sweep after 15 min)                                   └──otherwise──► REFUND_PENDING ──► REFUNDED
 ```
 
-`PAID` is not a separate persisted state in this slice: success and fulfilment commit in one transaction (the demo plan's "same transaction"), so an order is never PAID but not FULFILLED. Terminal states: `FULFILLED`, `CANCELLED`, `EXPIRED`, `REFUNDED`.
+Allowed transitions, enforced by a trigger: `CREATED→RESERVED|CANCELLED`, `RESERVED→AWAITING_PAYMENT|CANCELLED|EXPIRED|FULFILLED|REVALIDATING`, `AWAITING_PAYMENT→RESERVED|CANCELLED|EXPIRED|FULFILLED|REVALIDATING`, `EXPIRED|CANCELLED→REVALIDATING`, `REVALIDATING→FULFILLED|REFUND_PENDING`, `REFUND_PENDING→REFUNDED`. `FULFILLED` and `REFUNDED` have no exits. "Terminal for the buyer" means no buyer-driven exit; only a payment success can move `EXPIRED`/`CANCELLED`. `PAID` is not persisted: success and fulfilment commit together. `CREATED` is a shortfall holding state; it is excluded from "open orders" and swept to `CANCELLED` after 15 minutes. Attempts can only be created on `RESERVED`/`AWAITING_PAYMENT`, so success on a `CREATED` order is unreachable (asserted).
 
-**Payment attempt:** `CREATED → PENDING → SUCCEEDED | FAILED | CANCELLED`. Several attempts per order are allowed while the reservation lives.
+**Payment attempt:** `CREATED → PENDING → SUCCEEDED | FAILED | CANCELLED`. `SUCCEEDED` is **absorbing** (trigger). `FAILED`/`CANCELLED` events apply only from `CREATED`/`PENDING`; but a success event may still move `FAILED`/`CANCELLED` to `SUCCEEDED`, because the money is captured. Events are never ordered by provider timestamp. After a failed attempt the order stays `AWAITING_PAYMENT`; the reaper expires it when `reserved_until` passes.
 
-**Reservation clock:** `reserved_until = allocated_at + 5 min`; when the simulator confirms an attempt `PENDING`, extend to `max(current, now + 15 min)` capped at `allocated_at + 30 min` (doc 06 §4.2).
+**Reservation clock:** `reserved_until = asOf + 5 min` at allocation; when the simulator confirms an attempt `PENDING`, extend to `max(current, asOf + 15 min)` capped at `allocated_at + 30 min`, through a locked path. At the cap the reaper expires the order even with a `PENDING` attempt; a later success is a late success.
 
 ## 5. Data model (migration `0005_buyer_orders.sql`)
 
-All tables carry `scenario_id` (FK to `demo_namespaces`) so isolation is a column filter, as elsewhere.
+All tables carry `scenario_id` (FK to `demo_namespaces`). Changes to existing tables: `users.role` gains `'buyer'`; `demo_credits` gains `available_since timestamptz NOT NULL DEFAULT now()` (set at insert, never updated; backfilled from the batch's creation time) and `reserved_order_id uuid REFERENCES demo_orders(id)` with `CHECK ((state IN ('RESERVED','SOLD')) = (reserved_order_id IS NOT NULL))` and the extended guard.
 
 | Table | Purpose and key constraints |
 |---|---|
-| `demo_price_list` | `(scenario_id, effective_from)` PK, `unit_price_paise bigint CHECK > 0`, `created_by`. Insert-only (immutable trigger). Price in force = greatest `effective_from <= asOf`. No row → `PRICE_NOT_CONFIGURED`. |
-| `demo_orders` | `id`, `scenario_id`, `buyer_id`, `request_id` (UNIQUE per scenario+buyer) + `request_hash`, `quantity` (1..100), `state` CHECK, `unit_price_paise`, `price_effective_from`, `commission_bps`, `principal_paise`, `tax_paise` (0, with `tax_rule` text `DEMO_ZERO`), `payable_paise`, `shortfall` + `shortfall_reason`, `reserved_until`, `allocated_at`, `version`, timestamps. CHECK: `payable_paise = principal_paise + tax_paise`; `principal_paise = unit_price_paise × quantity` once allocated. |
-| `demo_order_items` | `order_id`, `credit_id` FK, `group_id` (capture), `active boolean`. **Partial UNIQUE `(credit_id) WHERE active`** is the database-level guarantee that no credit is held by two orders (P1). |
-| `demo_allocation_log` | immutable: order, `as_of`, inputs (per-group available/reserved/waiting-days), weights, cap, quota, per-group result, binding shortfall reason (`SUPPLY`/`CAP`/`QUOTA`). Powers the buyer's "why these credits" view. |
-| `demo_payment_attempts` | `id`, order, `provider_ref` UNIQUE, `state`, `amount_paise` (CHECK equals the order's `payable_paise` at creation, re-checked in the handler), `snapshot_hash`. |
-| `demo_payment_events` | `provider_event_id` PRIMARY KEY (webhook idempotency), attempt, `type`, `payload_hash`, `received_at`, `outcome` (`APPLIED`, `IGNORED_DUPLICATE`, `IGNORED_TERMINAL`, `REFUND_QUEUED`). Insert-only. |
-| `demo_payment_refunds` | `id`, order, attempt, `kind` (`LATE_UNFILLABLE`, `DUPLICATE`), `amount_paise`, `state` (`PENDING`, `REFUNDED`), UNIQUE `(attempt_id, kind)`. |
-| `demo_ledger_entries` | append-only (immutable trigger): one row **per credit sold**: `order_id`, `credit_id` UNIQUE, `payee_group_id`, `gross_paise`, `commission_paise`, `net_paise`, CHECK `gross = commission + net`, all ≥ 0. UNIQUE on `credit_id` makes a double posting impossible. |
-| `demo_group_state` | `(scenario_id, group_id)` PK, `last_allocated_at` — set **only on FULFILLED** (doc 06 step 7). |
-| `demo_buyer_limits` | `(scenario_id, buyer_id)` PK, row locked first at order creation for the per-buyer limits. |
+| `demo_price_list` | `(scenario_id, effective_from)` PK, `unit_price_paise bigint CHECK > 0`, `created_by`. Insert-only. Price in force = greatest `effective_from <= asOf`. |
+| `demo_orders` | `id`, `scenario_id`, `buyer_id`, `request_id`, `request_hash`, **UNIQUE `(scenario_id, buyer_id, request_id)`**, `quantity` (1..100, what the buyer asked), `allocated_quantity`, `state`, `unit_price_paise`, `price_effective_from`, `commission_bps`, `principal_paise`, `tax_paise` (0, `tax_rule='DEMO_ZERO'`), `payable_paise`, `shortfall_reason`, `reserved_until`, `allocated_at`, `version`, timestamps. CHECKs: `principal_paise = unit_price_paise × allocated_quantity`; `payable_paise = principal_paise + tax_paise`; `allocated_quantity ≤ quantity`. |
+| `demo_order_items` | `order_id`, `credit_id`, `group_id`, `generation int`, `active boolean`. **Partial UNIQUE `(credit_id) WHERE active`** and **partial UNIQUE `(order_id, credit_id) WHERE active`**. `active` means *held or sold*: it stays true after `FULFILLED`; reap and cancel set it false. Re-reservation inserts **new rows with `generation+1`** and never flips old rows back; "same credits" = the items of the order's highest generation. |
+| `demo_allocation_log` | immutable: order, `as_of`, `cap_basis_q` (the original Q), per-group inputs (available, reserved, waiting-days), weights, cap, quota, per-group result, binding shortfall reason. |
+| `demo_payment_attempts` | `id`, order, `provider` + `provider_ref` UNIQUE, `state`, `amount_paise`, `mismatch boolean`, `snapshot_hash`. Amount equals the order's `payable_paise` at creation. |
+| `demo_payment_events` | **PRIMARY KEY `(provider, provider_event_id)`**, attempt, `type`, `payload_hash`, `amount_paise`, `outcome` (enum below), `received_at`. Insert-only and written **last, in the apply transaction** (so `outcome` is final at insert; nothing updates it). |
+| `demo_payment_refunds` | `id`, order, attempt, `kind` (`LATE_UNFILLABLE`, `DUPLICATE_ATTEMPT`, `AMOUNT_MISMATCH`), `amount_paise` (the **captured** amount), `state` (`PENDING`, `REFUNDED`), UNIQUE `(attempt_id, kind)`. |
+| `demo_ledger_entries` | append-only (trigger): one row per credit sold: `order_id`, `credit_id` UNIQUE, `payee_group_id`, `gross_paise`, `commission_paise`, `net_paise`, CHECK `gross = commission + net`, all ≥ 0. |
+| `demo_group_state` | `(scenario_id, group_id)` PK, `last_allocated_at`; set **only on FULFILLED**. A group with no row is treated as never allocated (LEFT JOIN; `greatest` ignores NULL). |
 
-Also: `users.role` CHECK gains `'buyer'`; a trigger rejects a `demo_orders` state change that is not in the machine above (same style as `guard_demo_credit`).
+`demo_buyer_limits` from revision 1 is **dropped**: under the scenario lock the buyer's open orders and reserved credits are counted directly.
+
+Cross-table integrity: the order trigger cannot see credits and the credit guard cannot see orders, so a **deferred constraint trigger** on `demo_orders` fires when the state becomes `FULFILLED` and checks: active item count = `allocated_quantity`; every item's credit is `SOLD` with `reserved_order_id` = the order; ledger row count = `allocated_quantity`; `Σ gross = principal_paise`. Without it nothing stops `FULFILLED` with unsold credits.
+
+**Payment outcome enum:** `FULFILLED`, `REVALIDATED_FULFILLED`, `REFUND_LATE_UNFILLABLE`, `REFUND_DUPLICATE_ATTEMPT`, `AMOUNT_MISMATCH`, `ATTEMPT_UPDATED`, `IGNORED_SAME_ATTEMPT`, `IGNORED_TERMINAL`.
 
 ## 6. Operations and API
 
-All routes are under `/api/v1`, require a session, check CSRF on writes, and derive scenario and buyer from the session. Quantities and prices are never accepted from the client except `quantity` and `requestId`.
+All routes under `/api/v1`, session + CSRF on writes (except the webhook), scenario and buyer derived from the session. The client supplies only `quantity`, `requestId` and (optionally) a quote.
 
 | Route | Behaviour |
 |---|---|
-| `GET /market/inventory` | Counts of AVAILABLE credits, price in force, per-group availability labels. Cacheable for a few seconds, `no-store` for private fields. |
-| `POST /orders` `{requestId, quantity, quotedTotalPaise?}` | One transaction under the scenario lock: reap lapsed reservations, resolve price, run FCAE v0, reserve credits, write items, allocation log, snapshot, audit event. Returns the order, allocation explanation, `expiresAt`, and `priceChangedFromQuote`. A shortfall returns the partial allocation **un-reserved** with the binding reason; the buyer then calls accept or cancel (see below). Replaying the same `requestId` returns the stored result; reusing it with different input is `KEY_REUSE`. |
-| `POST /orders/:id/accept-partial` | Reserves the offered partial set (re-checked under the lock; if it changed, returns a new shortfall). |
-| `POST /orders/:id/payment-attempts` `{acceptSnapshotHash?}` | Verifies the order is `RESERVED`/`AWAITING_PAYMENT`, the buyer owns it, items are active, and the price snapshot is accepted if it changed. Creates the attempt; the simulator confirms `PENDING`, which extends the reservation. |
-| `POST /orders/:id/cancel` | Releases credits, order `CANCELLED`. Refused once `FULFILLED`. |
-| `GET /orders`, `GET /orders/:id` | Own orders only; includes items, allocation explanation, payment attempts, refund status, and ledger lines once fulfilled. |
-| `POST /payments/webhooks/simulator` | **Unauthenticated by cookie, authenticated by HMAC signature and timestamp window.** Records the event first (idempotency by `provider_event_id`), then applies it. |
-| `POST /demo/orders/:id/simulate` `{outcome: success\|failure\|duplicate\|late_success}` | Presenter-only. The simulator builds a signed provider event and posts it to the webhook handler in-process. `late_success` first advances the order past `reserved_until`. |
+| `GET /market/inventory` | AVAILABLE counts, price in force, per-group labels and availability. |
+| `POST /orders` `{requestId, quantity, quotedTotalPaise?}` | §6.3. Replays return the stored order; reuse of `requestId` with a different `quantity` or quote is `KEY_REUSE`. |
+| `POST /orders/:id/accept-partial` | §6.3. |
+| `POST /orders/:id/payment-attempts` `{acceptSnapshotHash?}` | Locked; checks ownership of credits, state, and snapshot acceptance if the quote changed. Simulator confirms `PENDING` and extends the reservation. |
+| `POST /orders/:id/cancel` | Locked; releases credits, `active=false`, order `CANCELLED`. Refused once `FULFILLED`. |
+| `GET /orders`, `GET /orders/:id` | Own orders only, **rebuilt from stored rows** (order, items, allocation log), never recomputed. |
+| `POST /payments/webhooks/simulator` | §6.1. No cookie, no CSRF; signature only. Absent `PAYMENT_WEBHOOK_SECRET` → 404. |
+| `POST /demo/orders/:id/simulate` `{outcome}` | Presenter only, `DEMO_MODE` only. Outcomes: `success`, `failure`, `replay` (same event id again), `double_charge` (a second attempt succeeds), `late_success`, `refund` (settle pending refunds). **It must run its prelude** (for `late_success`: advance `reserved_until` and run `reapExpired`) **in its own short transaction that commits, and then call `handlePaymentEvent` with no transaction open**, so it never holds the scenario lock while the handler takes it. |
 
-### 6.1 Success handler (the critical path)
+### 6.1 Webhook and success handler
 
-Order of locks is fixed: scenario row → buyer-limits row (creation only) → order row → credit rows ascending id.
+```
+handlePaymentEvent(db, {body: Buffer, signature, timestamp}, opts?) → {status: 200|401|404|409|503, outcome?}
+```
 
-1. Verify HMAC and timestamp; insert `demo_payment_events` with `ON CONFLICT DO NOTHING`. If it already existed, return the stored outcome (`IGNORED_DUPLICATE`) with no side effect.
-2. Take the scenario lock, then lock the order and its credits. Re-read everything **under the lock**.
-3. If the order is `FULFILLED`, `REFUNDED` or `REFUND_PENDING`: record a `DUPLICATE` refund row for this attempt, order unchanged.
-4. Ownership check: every credit is `RESERVED`, every item `active`, and each credit's active item belongs to **this order**. If yes: credits → `SOLD`, one ledger row per credit, `demo_group_state.last_allocated_at = now()` per group, order → `FULFILLED`, audit event, all in this transaction. The attempt's amount must equal `payable_paise`, otherwise nothing is applied and the event is flagged `AMOUNT_MISMATCH` for reconciliation.
-5. Ownership check fails (expired, reaped, released): order → `REVALIDATING`; try to re-reserve **the same credits, all-or-nothing**. If every one is `AVAILABLE`: continue as step 4 (quota-exempt). Otherwise order → `REFUND_PENDING` and insert a `LATE_UNFILLABLE` refund. No partial fill after payment.
-6. Non-success events (`FAILED`, `CANCELLED`) never change an order in a terminal state.
+**Before any transaction:** verify `HMAC-SHA256(secret, timestamp + "." + rawBody)` in constant time (length and hex pre-check), accepting either of two configured secrets (rotation); timestamp within ±5 minutes of the app clock; body size cap; per-IP rate limit. Fastify keeps the **raw body** for this route. Failures return 401 and write nothing. Resolve `scenario_id` and `order_id` from `provider_ref` (immutable, unlocked read); an unknown `provider_ref` returns 404, writes nothing, and increments a metric.
+
+**One transaction inside `withScenarioLock`:**
+
+1. `SELECT` the event by `(provider, provider_event_id)`. If found, compare `payload_hash`: equal → return the stored outcome (idempotent replay); different → 409 `EVENT_REUSE` plus a metric. No side effects either way.
+2. Lock the order, then the attempt, then the order's credits ascending (the highest-generation items and any credit with `reserved_order_id` = this order).
+3. Decide, first match wins:
+   - success, **amount or currency differs** from `attempt.amount_paise`, or the attempt differs from `order.payable_paise`: attempt → `SUCCEEDED` with `mismatch=true`; insert refund `AMOUNT_MISMATCH` for the **event** amount; order untouched. Outcome `AMOUNT_MISMATCH`. (Checked first so no branch strands captured money.)
+   - success, attempt already `SUCCEEDED`: `IGNORED_SAME_ATTEMPT`. **No refund** (it is the same charge).
+   - failure/cancel: apply only if the attempt is `CREATED`/`PENDING`, else `IGNORED_TERMINAL`. A failure never regresses a `SUCCEEDED` attempt.
+   - success on a **different attempt**, order already `FULFILLED`/`REFUND_PENDING`/`REFUNDED`: attempt → `SUCCEEDED`, refund `DUPLICATE_ATTEMPT` for the event amount, order unchanged.
+   - success, order `RESERVED`/`AWAITING_PAYMENT`, every credit `RESERVED` for this order with an active item (**even if `reserved_until` has passed and the reaper has not run**): fulfil.
+   - otherwise (ownership broken, or order `EXPIRED`/`CANCELLED`): order → `REVALIDATING`. **Check first, then write**: lock all the order's credits ascending; if every one is `AVAILABLE`, insert new items (`generation+1`), set them `RESERVED` then `SOLD`, fulfil (quota-exempt; outcome `REVALIDATED_FULFILLED`). If any is not available, write nothing to credits; order → `REFUND_PENDING`, refund `LATE_UNFILLABLE`. No partial fill after payment.
+4. **Fulfil**, in this order: credits `RESERVED → SOLD`; one ledger row per credit; `demo_group_state.last_allocated_at = asOf` per group; attempt `SUCCEEDED`; order `FULFILLED`; audit event (B12). The deferred constraint trigger checks the result at commit.
+5. **Insert the `demo_payment_events` row last, with its final outcome**, then commit. Any exception rolls back everything including the event row and returns 503, so the provider's redelivery is applied from scratch. A 23505 on the event key means another transaction applied it first: re-read in a fresh transaction and return the stored outcome. Repeated 503s for one event id are counted (`payment_event_5xx_total`) from a separate tiny transaction so a deterministic apply failure is visible.
+
+`settleRefunds(db, scenarioId)`: under the lock, `PENDING → REFUNDED`; then each `REFUND_PENDING` order with no remaining `PENDING` refund → `REFUNDED`. Driven by the simulator `refund` outcome and by the worker, so the refund path is testable and demonstrable.
 
 ### 6.2 Reservation reaping
 
-`reapExpired(db, asOf)` runs under the scenario lock at the start of every allocation and from the worker. It moves RESERVED credits whose active item's order passed `reserved_until` back to `AVAILABLE`, sets `active=false`, and moves the order to `EXPIRED` (unless an attempt is `PENDING`; then it asks the simulator for the attempt's status first, per doc 06 §4.2 "Sweeper"). The worker cycle gains a market sweep step with its own metrics (`greenchain_reservations_reaped_total`, `greenchain_orders_by_state`).
+`reapExpired(tx, scenarioId, asOf)` is callable **only inside `withScenarioLock`**. It runs at the start of every allocation and from the worker. Orders in ascending id, credits ascending: orders past `reserved_until` → `EXPIRED`, items `active=false`, credits `RESERVED → AVAILABLE` with `reserved_order_id` cleared; `CREATED` orders older than 15 minutes → `CANCELLED`. **It makes no provider call.** (Revision 1 had the reaper ask the simulator under the lock, which is an RPC inside a lock; the late-success path already handles the race that call guarded against.) The worker cycle gains a market sweep with metrics.
 
-### 6.3 FCAE v0 (what is computed)
+### 6.3 `POST /orders` and FCAE v0
 
-Inputs, read under the lock: per group `a_g` (AVAILABLE count), `r_g` (RESERVED count), `waiting_days_g = ⌊(asOf − max(last_allocated_at_g, oldest_available_at_g))/1 day⌋`. For each group `u_g = min(a_g, cap, room_g)`, `cap = max(1, ⌊0.15·Q⌋)`, `room_g = max(0, quota_g − r_g)`, `quota_g = max(1, ⌊0.5·(a_g+r_g)⌋)` (skipped when REVALIDATING). If `Σu_g < Q`, return a shortfall with the binding reason; the cap is never silently relaxed (no `cap_override` in this slice). Otherwise fill by descending `waiting_days_g` then ascending group id, one credit per round up to `u_g`, lowest credit id first within a group. The result is deterministic for stored inputs and is written to the allocation log. **Per-buyer limits:** at most 3 open orders and at most 10% of currently eligible supply reserved at once, counted under the buyer-limits row.
+```
+createOrder(db, actor: BuyerActor, {requestId, quantity, quotedTotalPaise?}) → OrderView
+allocateFcaeV0(inputs, q, {take?, capBasisQ, skipQuota}) → result      // pure, no I/O
+```
+
+One `withScenarioLock`: (1) replay lookup by `(scenario_id, buyer_id, request_id)` **before the reap**, as `beginUpload` does; the hash covers `quantity` and `quotedTotalPaise`. (2) `reapExpired`. (3) buyer limits (B11) → `422 BUYER_LIMIT`. (4) price at `asOf` (`PRICE_NOT_CONFIGURED` aborts and rolls back). (5) recount groups and run FCAE. (6) *Shortfall:* insert the order in `CREATED` with `shortfall_reason` and the allocation log; no credits touched. *Otherwise:* insert the order `RESERVED`, lock credits ascending, insert items (generation 1), set credits `RESERVED` with `reserved_order_id`, log, audit. A 23505 on the request key or item index is mapped to "re-read in a fresh transaction", never a 500.
+
+FCAE v0 inputs, under the lock: per group `a_g`, `r_g`, `waiting_days_g = ⌊(asOf − max(last_allocated_at_g, oldest_available_at_g))/1 day⌋` where `oldest_available_at_g` is the minimum `available_since` of its AVAILABLE credits. `u_g = min(a_g, cap, room_g)`, `cap = max(1, ⌊0.15·capBasisQ⌋)`, `room_g = max(0, quota_g − r_g)`, `quota_g = max(1, ⌊0.5·(a_g+r_g)⌋)`. If `Σu_g < Q`, shortfall with the binding reason (`SUPPLY`, `CAP`, `QUOTA`); the cap is never silently relaxed. Otherwise fill by descending `waiting_days_g`, ascending group id, one credit per round, lowest credit id first.
+
+**Partial fill.** `accept-partial` re-runs allocation under the lock with `take = k` (the offered count) and `capBasisQ` = the **original** Q, so the cap does not shrink. If supply changed so `k` is no longer feasible, it returns a **new shortfall**, never a silent smaller order. On success `allocated_quantity = k` and `principal = unit_price × k`. A quote comparison uses `quantity × price`, not the allocated amount.
 
 ## 7. Failure modes
 
 | Failure | Detection | Required behaviour | Test |
 |---|---|---|---|
-| Two buyers take the last credits at once | partial unique index; scenario lock | exactly one wins; the other gets a shortfall (`SUPPLY`), never an error 500 | race (pg) |
-| Same `requestId` retried or sent twice concurrently | receipt unique key | one order, identical response; different body → `KEY_REUSE` | race (pg) |
-| Webhook delivered twice, in parallel | `provider_event_id` PK | one fulfilment, one set of ledger rows | race (pg) |
-| Two **different** success events for one attempt/order | order state check | second recorded as `DUPLICATE` refund; order unchanged | pglite + pg |
-| Success arrives after expiry, credits still free | ownership check fails → REVALIDATING | same credits re-reserved, order FULFILLED | pglite |
-| Success arrives after expiry, a credit was taken | REVALIDATING fails | `REFUND_PENDING` then `REFUNDED`; no credit sold | pglite + pg race (expiry vs payment) |
-| Payment failure or buyer abandons | attempt `FAILED`; reservation lapses | credits released, order `EXPIRED`; retry allowed inside the reservation | pglite |
-| Reservation expires while the success handler runs | lock order: whichever takes the scenario lock first wins; the other re-reads | consistent either way; never SOLD for an expired, re-reserved credit | race (pg) |
-| Webhook with bad/missing signature or stale timestamp | HMAC check before any write | 401, nothing recorded as applied | pglite |
-| Amount in event differs from `payable_paise` | handler check | no state change; event stored `AMOUNT_MISMATCH`; visible in metrics | pglite |
-| Buyer reads or acts on another buyer's/scenario's order | ownership predicate | 404, never 403 (no existence leak) | pglite |
-| Agent or verifier calls a buyer route; buyer calls agent routes | role check | 403 | pglite |
-| Price list changes between quote and order | `quotedTotalPaise` mismatch | `priceChangedFromQuote=true`; a payment attempt requires `acceptSnapshotHash` | pglite |
-| No price configured | resolve step | `PRICE_NOT_CONFIGURED`, whole transaction rolled back, nothing reserved | pglite |
-| Database or worker down during payment | webhook returns 503, provider retries | event not recorded until applied; replay applies once | pglite |
-| Sweeper crash mid-reap | single transaction | all-or-nothing; next sweep repeats | pglite |
-| Integer overflow or float in money | type and CHECK | all money is `bigint`; test with large quantity × price | unit |
+| Two buyers take the last credits | partial unique index; scenario lock | exactly one wins; the other gets a shortfall (`SUPPLY`), never a 500 | pg race |
+| Same `requestId` sent twice concurrently | unique `(scenario, buyer, request_id)` | one order, identical response; different body → `KEY_REUSE`; same id from two buyers → two orders | pg race |
+| Webhook delivered twice, in parallel | event PK, checked under the lock | one fulfilment, one set of ledger rows | pg race |
+| Apply rolls back after verification | event row written last | no event row; redelivery applies from scratch | pglite (forced trigger error) + pg |
+| Same event id, different body | payload hash compare | 409 `EVENT_REUSE`, no change | pglite |
+| Second success event, **same attempt** | attempt absorbing | `IGNORED_SAME_ATTEMPT`, **no refund** | pglite |
+| Second attempt also succeeds | order already fulfilled | `DUPLICATE_ATTEMPT` refund; order unchanged | pglite + pg race |
+| Amount or currency mismatch (any branch) | check first | `AMOUNT_MISMATCH` refund for the event amount; order untouched; metric | pglite |
+| Success after expiry, credits free | ownership check → REVALIDATING | same credits re-reserved, fulfilled | pglite |
+| Success after expiry, a credit taken | REVALIDATING fails | `REFUND_PENDING` then `REFUNDED`; no credit sold | pglite + pg race |
+| Success after the buyer **cancelled** | same path | fulfils if the credits are free, else refund (B10) | pglite |
+| Expiry racing payment success | one scenario lock, both lock orders | consistent either way; no credit held by two orders | pg race |
+| Failure event after success (out of order) | attempt absorbing | attempt stays `SUCCEEDED` | pglite |
+| Failed attempt, buyer abandons | `reserved_until` | order stays `AWAITING_PAYMENT`, reaper expires it, credits released | pglite |
+| Shortfall order left in `CREATED` | sweep | cancelled after 15 min; not counted as open | pglite |
+| Bad/missing signature, stale or future timestamp, tampered body, rotated secret | pre-transaction verify | 401, no writes | pglite |
+| Valid signature, unknown `provider_ref` | resolve step | 404, no row, metric | pglite |
+| Cross-buyer or cross-scenario order access | ownership predicate | 404 | pglite |
+| Agent/verifier on buyer routes; buyer on agent routes | role check | 403 | pglite |
+| Quote differs from price | `quotedTotalPaise` mismatch | `priceChangedFromQuote`; attempt requires `acceptSnapshotHash` | pglite |
+| No price configured | resolve step | `PRICE_NOT_CONFIGURED`, rollback | pglite |
+| Buyer over limit | counts under lock | `422 BUYER_LIMIT` | pglite |
+| Simulate called while a lock is held (misuse) | design rule | prelude commits first; test documents the hang | pg |
+| Cancel × reaper × webhook × create interleaved | single lock helper | zero deadlocks (SQLSTATE 40P01 count = 0) | pg race |
+| `FULFILLED` with unsold credits / missing ledger / gross mismatch | deferred constraint trigger | commit fails | pglite |
+| Database down during webhook | 503 | event not recorded; redelivery applies once | pglite |
+| Money overflow or float | `bigint`, CHECKs | large quantity × price exact | unit |
 
 ## 8. Invariants (scheduled checks and test oracles)
 
-1. A credit is `SOLD` ⇔ it has exactly one ledger row and its order is `FULFILLED`.
-2. A credit is `RESERVED` ⇔ it has exactly one active order item and its order is `RESERVED` or `AWAITING_PAYMENT`.
-3. No reservation outlives `reserved_until` by more than one sweep interval.
-4. For every `FULFILLED` order: `Σ gross = principal_paise = unit_price_paise × quantity` and `Σ commission + Σ net = Σ gross`; one `APPLIED` payment event with matching amount.
-5. Every `REFUNDED` or `REFUND_PENDING` order has zero `SOLD` credits and a refund equal to the captured amount.
-6. `demo_group_state.last_allocated_at` changed only for groups with a `FULFILLED` order.
+1. A credit is `SOLD` ⇔ it has exactly one ledger row, `reserved_order_id` is a `FULFILLED` order, and that order's active item for the credit exists.
+2. A credit is `RESERVED` ⇔ it has exactly one active item and its order is `RESERVED`, `AWAITING_PAYMENT` or `REVALIDATING`.
+3. No reservation outlives `reserved_until` by more than one sweep interval, except through an unreaped order whose success is still applicable.
+4. For every `FULFILLED` order: `Σ gross = principal_paise = unit_price_paise × allocated_quantity`, `Σ commission + Σ net = Σ gross`, and exactly one payment event with outcome `FULFILLED`/`REVALIDATED_FULFILLED` whose amount equals `payable_paise`.
+5. Every `REFUND_PENDING`/`REFUNDED` order has zero `SOLD` credits and refunds that sum to the captured amount.
+6. `demo_group_state.last_allocated_at` is changed only for groups with a `FULFILLED` order.
 7. The audit chain stays verified (`verifyAuditFull`) after any sequence of the above.
 
-The oracle is a function `assertMarketInvariants(db)` used by every test and exposed as a worker check with a metric (`greenchain_market_invariant_violations`).
+`assertMarketInvariants(db)` is the oracle for every test and a worker check (`greenchain_market_invariant_violations`).
 
-## 9. Security and privacy
+## 9. Security, privacy, observability
 
-- Buyer identity from session only; every query filters `scenario_id` and `buyer_id`. Tests cover IDOR on order IDs, attempt IDs and ledger lines.
-- Webhook: constant-time HMAC compare, 5-minute timestamp window, body size limit, event stored by id before processing. The secret comes from `PAYMENT_WEBHOOK_SECRET` (required to enable the route; absent → route returns 404). It is never logged (already covered by logger redaction patterns; add `PAYMENT_WEBHOOK_SECRET` and `signature` to the redact list).
-- No farmer PII reaches a buyer response. A test asserts the serialized buyer inventory and order payloads contain none of the fixture's label/village strings.
-- Simulate endpoint exists only for scenarios present in `demo_namespaces`, and only for the `agent` presenter role; the production configuration flag `DEMO_MODE=false` removes it.
-- Banner "Demonstration — synthetic credits and simulated payments" on every buyer screen and in every response `namespace: "DEMO_ONLY"`. No claim of real settlement or recognised credits.
+- Buyer identity from session only; every query filters `scenario_id` and `buyer_id`; tests cover IDOR on order, attempt and ledger ids.
+- Webhook: signature covers timestamp and raw body; constant-time compare; two-secret rotation; body cap and rate limit; exempt from cookie/CSRF; never logs the secret or signature (add `PAYMENT_WEBHOOK_SECRET`, `signature` to the logger redact list). Replaying a captured signed request is harmless because applies are idempotent; the window mainly bounds abuse after a secret leak. If a real provider sends no timestamp, the window moves into that adapter.
+- No farmer PII in buyer responses (test asserts fixture label/village strings never appear).
+- `simulate` exists only when `DEMO_MODE` is on and only for `demo_namespaces` scenarios. Every buyer screen and response carries "Demonstration — synthetic credits and simulated payments" and `namespace: "DEMO_ONLY"`.
+- Logs (structured, no secrets): `requestId, scenarioId, orderId, attemptId, eventId, outcome, lockWaitMs, txMs`. Metrics: `payment_events_total{outcome}`, `webhook_rejected_total{reason}`, `payment_event_5xx_total`, `payment_unmatched_total`, `refunds_pending`, `scenario_lock_wait_ms`, `orders_created_total{result}`, `reservations_reaped_total`, `orders_by_state`, `market_invariant_violations`.
 
 ## 10. Deviations from the production design
 
 | Production (doc 06/09) | This slice | Trigger to remove the deviation |
 |---|---|---|
-| Per-credit-type advisory locks, order of six lock classes | Scenario row lock | A second credit type or throughput beyond one lock per scenario |
+| Per-credit-type advisory locks, six lock classes | Scenario row lock via one helper | A second credit type or throughput beyond one lock per scenario |
 | Maintained `farmer_available` aggregate | Recount | ~10k credits per scenario or p95 allocation > 200 ms |
 | Price book with state/vintage keys, tax rules, invoices | Flat effective-dated price, zero-tax marker | Invoicing slice |
 | FRPS tier weights | Weight 1 | FRPS tiers exist |
-| `cap_override` | Not available | Pilot with fewer than 7 groups needs it |
-| Journal/lots/reserve in the same transaction | Per-credit ledger rows only | Payout slice (it will add the journal and read these rows) |
+| `cap_override` | Not available | Pilot with fewer than 7 groups |
+| Per-buyer limits row (lock 0) | Counts under the scenario lock | Per-type locks replace the scenario lock |
+| Journal/lots/reserve in the same transaction | Per-credit ledger rows only | Payout slice |
 | Payee group nomination | Group = case | Payee nomination feature |
+| Sweeper asks the provider before expiring a PENDING attempt | No provider call; late-success path covers it | A real provider with observable pending state |
 
 ## 11. Test plan
 
-**PGlite (logic, constraints):** price resolution and `PRICE_NOT_CONFIGURED`; FCAE v0 determinism (shuffled input), cap, quota, shortfall reasons, REVALIDATING quota exemption; every state transition, and illegal ones rejected by the trigger; webhook signature/timestamp; each failure row above; role matrix; PII-absence; money rounding and per-line half-even; `assertMarketInvariants` after every scenario; audit chain verified at the end.
+PGlite is single-connection: it proves logic and constraints, **not locking**. Every race below runs on real PostgreSQL (`npm run test:pg`) with parallel connections and gets a **mutation check** (remove the lock, index or trigger; watch the test go red), as for the existing suite.
 
-**Real PostgreSQL (`npm run test:pg`), parallel connections:** last-credits race with N buyers; concurrent identical and conflicting `requestId`; duplicate and parallel webhooks; expiry racing payment success in both lock orders; concurrent reap and allocate; concurrent success events for one order. Each race gets a **mutation check** (remove the lock or unique index, watch the test fail) as for the existing suite.
+**PGlite:** price resolution; FCAE v0 (determinism with shuffled input, cap, quota, shortfall reasons, `capBasisQ` stability on partial fill); every legal and illegal order and attempt transition; each failure row marked pglite; deferred constraint trigger; money rounding (half-even, large values); role matrix; PII absence; `assertMarketInvariants` after every scenario; `verifyAuditFull` at the end.
 
-**Smoke:** a script `scripts/demo-market-smoke.mjs` runs the 8–10 minute presentation path against a running local API and prints the invariant report.
+**Real PostgreSQL:** last-credit race with N buyers; concurrent identical and conflicting `requestId`; duplicate and parallel webhooks; two attempts succeeding in parallel (one fulfilment, one refund); expiry vs success in both lock orders; cancel × reaper × webhook × create with random interleavings and a deadlock count of zero; `asOf` taken after the lock wait; forced failure mid-apply then redelivery.
+
+**Smoke:** `scripts/demo-market-smoke.mjs` runs the presentation path (browse, order, allocation explanation, pay, replay the callback, unchanged ledger) against a running local API and prints the invariant report.
 
 ## 12. Build sequence (each step ends with tests green and a commit)
 
-1. **Migration 0005 and domain core:** tables, triggers, price resolution, FCAE v0 as a pure function with property tests. No HTTP.
-2. **Order service:** create, accept-partial, cancel, reap; invariants function; PGlite tests; first pg races (last credit, requestId).
-3. **Payment port, simulator and webhook handler:** success handler with all branches; duplicate, late, refund; pg races (duplicate webhook, expiry vs payment).
-4. **HTTP routes, buyer role, seed** (20 groups × 10 credits, a buyer account, the price list), auth/IDOR tests.
+1. **Migration 0005 and constraint tests first** (PGlite): tables, `available_since`, `reserved_order_id`, extended credit guard, order/attempt triggers, deferred constraint trigger, role widening. FCAE v0 and commission math as pure functions with property tests.
+2. **`withScenarioLock`, `reapExpired`, `createOrder`, `accept-partial`, `cancel`**, `assertMarketInvariants`; PGlite tests; pg races: last credit, `requestId`, reaper/create/cancel interleaving.
+3. **Payment port, simulator, `handlePaymentEvent`, `settleRefunds`:** all decision branches; pg races: duplicate and parallel webhooks, two attempts, expiry vs success, forced-rollback redelivery.
+4. **HTTP routes** (raw-body capture for the webhook, buyer role, CSRF exemption), **seed** (20 groups × 10 credits, buyer account, price list), auth/IDOR tests.
 5. **Worker sweep, metrics, invariant check;** README and docs 17/22 status.
-6. **Web:** marketplace and quote, order detail with allocation explanation, payment status, presenter simulate panel, banner. Manual device checks stay deferred as before.
+6. **Web:** marketplace and order, allocation explanation, payment status, presenter simulate panel, banner. Manual device checks stay deferred as before.
 
-## 13. Open questions for sign-off
+## 13. Open questions (defaults apply unless you change them)
 
-1. **B3 flat price vs price book.** Recommended: flat now (this spec). The alternative adds vintage/state keys and a publish workflow, roughly doubling step 1.
-2. **Seed size.** Recommended: 20 groups × 10 credits, matching doc 13, created by a direct seed (the real issuance path yields one to two credits per case and would need 20 full capture-to-review runs).
-3. **Commission rate.** Placeholder 5% (500 bps) from doc 09's worked example; confirm or give the demo value.
-4. **Refund realism.** The simulated refund resolves immediately on the next simulator tick. Do you want a visible `REFUND_PENDING` interval in the demo?
-5. **Buyer sign-in.** One seeded buyer account in the `presenter` scenario (recommended), or a separate buyer scenario so the presenter sees inventory only through the marketplace?
+1. **Flat price vs price book (B3).** Default: flat. The alternative adds vintage/state keys and a publish workflow.
+2. **Seed size.** Default: 20 groups × 10 credits by direct seed (the real issuance path yields 1–2 credits per case). With B11 this caps an order at about 20.
+3. **Commission rate.** Default: 5% (500 bps), the placeholder from doc 09's worked example.
+4. **Refund realism.** Default: refunds stay `REFUND_PENDING` until the presenter triggers `refund` (or the worker's next settle), so the interval is visible.
+5. **Buyer sign-in.** Default: one seeded buyer in the `presenter` scenario.
+
+## 14. What revision 2 changed (from the independent design review)
+
+Critical: the payment-event row was written before the apply transaction, so a rollback lost a captured payment (now written last, in the same transaction); a second success on the *same* attempt would have refunded a legitimate fulfilment (now `IGNORED_SAME_ATTEMPT`, refund only for a different attempt). High: amount mismatch was checked on one branch only; simulate could deadlock by calling the handler under the lock; the reaper made a provider call inside the lock; `cancel`/`accept-partial`/refund paths had no defined lock order; `active` item semantics and re-reservation against the partial unique index were undefined; partial fills broke the principal CHECK and shrank the cap; `EXPIRED`/`CANCELLED` could not reach `REVALIDATING`. Medium: webhook signature did not cover the timestamp or raw body, no rotation, no body cap; `demo_credits.available_since` did not exist; `audit_events` requires a case (decision B12); `demo_buyer_limits` was redundant; `now()` is stale after a lock wait; commission rounding must be done in BigInt.
