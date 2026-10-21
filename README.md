@@ -79,6 +79,8 @@ With `DEMO_MODE=true` the presenter (agent account) drives the simulated provide
 
 The local demo creates `.local/buyer-password.txt` and `.local/payment-webhook-secret.txt` once and always runs with simulated payments on.
 
+In the web app, choose **Company buyer** at sign-in to get the marketplace: available supply by pseudonymous farmer group, an order form with an exact estimate, the reserved order with a countdown and a "why these credits" explanation, partial-fill offers, payment, and the purchased credit list or refund status. A browser holds one session at a time, so present it with two windows: the buyer in one, and the presenter (**Field agent / presenter**) in a private window, where the **Simulated payment provider** panel lists the scenario's orders and applies any provider outcome. The buyer's page refreshes by itself while a payment or refund is in progress. Ordering and payment are disabled while the device is offline; nothing is queued.
+
 ### Integration tests on real PostgreSQL
 
 `npm test -w apps/api` uses in-process PGlite (one connection), which is fast but cannot show races between connections. `npm run test:pg -w apps/api` runs `apps/api/test/pg` against a real server with parallel connections: the evidence-upload quota (34 concurrent 2 MiB reservations admit exactly 32), competing and replayed calculation approvals (one batch), signer-lease claim and expiry fencing, concurrent audit appenders and chainers, and concurrent migrators. Each test file creates and drops its own throwaway database.

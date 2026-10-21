@@ -27,7 +27,8 @@ export async function buildApp(db: Database, config: {origin:string; secure:bool
   const options:FastifyServerOptions={bodyLimit:16384,trustProxy:config.trustProxy?(_address:string,hop:number)=>hop<config.trustProxy!:false,logger:{redact:['req.headers.cookie','req.headers.authorization','req.headers.x-csrf-token','req.headers.x-greenchain-signature']},ajv:{customOptions:{removeAdditional:false}}};
   const app = Fastify(options);
   await app.register(cookie);
-  await app.register(cors,{origin:config.origin,credentials:true});
+  // The web app signs out with DELETE and saves boundaries and evidence chunks with PUT; the cors plugin allows only GET/HEAD/POST by default.
+  await app.register(cors,{origin:config.origin,credentials:true,methods:['GET','HEAD','POST','PUT','DELETE']});
   app.setErrorHandler((error,request,reply) => {
     // Framework-level client errors (oversize body, malformed JSON, unsupported media type) carry their own 4xx status.
     const framework = error && typeof error === 'object' && 'statusCode' in error && Number.isInteger((error as {statusCode:unknown}).statusCode) && (error as {statusCode:number}).statusCode >= 400 && (error as {statusCode:number}).statusCode < 500 ? (error as {statusCode:number}).statusCode : undefined;

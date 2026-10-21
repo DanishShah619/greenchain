@@ -4,7 +4,7 @@ import type {Actor} from '../../capture/application/capture.js';
 import {acceptPartial,cancelOrder,createOrder,getOrder,listOrders,type MarketConfig} from '../application/orders.js';
 import {inventory} from '../application/inventory.js';
 import {handlePaymentEvent,startPaymentAttempt,type PaymentConfig} from '../application/payments.js';
-import {SIMULATED_OUTCOMES,simulate,type SimulatedOutcome} from '../infrastructure/simulator.js';
+import {SIMULATED_OUTCOMES,presenterOrders,simulate,type SimulatedOutcome} from '../infrastructure/simulator.js';
 import {WorkflowError} from '../../../kernel/errors.js';
 import type {Metrics} from '../../../kernel/metrics.js';
 export type MarketRoutesConfig={market:MarketConfig;payments:PaymentConfig;demoMode:boolean;webhookRatePerMinute?:number;
@@ -58,6 +58,7 @@ export async function registerMarketRoutes(app:FastifyInstance,db:Database,actor
   }
   // Presenter controls for the simulated provider. Only in demo mode; absent (404) otherwise.
   if(config.demoMode&&config.payments.secrets.length){
+    app.get('/api/v1/demo/orders',async request=>presenterOrders(db,await actor(request)));
     app.post<{Params:{id:string};Body:{outcome:SimulatedOutcome}}>('/api/v1/demo/orders/:id/simulate',{schema:{params:idParams,body:{type:'object',additionalProperties:false,
       required:['outcome'],properties:{outcome:{enum:[...SIMULATED_OUTCOMES]}}}}},async(request,reply)=>{
       const result=await simulate(db,await actor(request,true),request.params.id,request.body.outcome,config.payments);

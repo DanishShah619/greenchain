@@ -55,3 +55,17 @@ export async function simulate(db:Database,actor:Actor,orderId:string,outcome:Si
     :eventBody({id:`evt_${randomUUID().replace(/-/g,'')}`,type:TYPE[outcome as keyof typeof TYPE],providerRef:attempt.attempt.provider_ref,amountPaise:String(attempt.attempt.amount_paise),currency:'INR'});
   return handlePaymentEvent(db,signedDelivery(config,body),config);
 }
+/**
+ * Presenter view of the scenario's recent orders, so the simulated provider can be driven from a second window while a
+ * buyer shops in the first. Demo mode only (the route is not registered otherwise). Amounts and states only: no farmer data.
+ */
+export async function presenterOrders(db:Database,actor:Actor){
+  if(actor.role!=='agent')throw new WorkflowError('FORBIDDEN',403);
+  const rows=(await db.query(`SELECT o.id,o.state,o.quantity,o.allocated_quantity,o.payable_paise,o.reserved_until,o.created_at,
+      (SELECT a.state FROM demo_payment_attempts a WHERE a.order_id=o.id ORDER BY a.created_at DESC,a.id DESC LIMIT 1) AS payment,
+      (SELECT count(*)::int FROM demo_payment_refunds r WHERE r.order_id=o.id AND r.state='PENDING') AS refunds_pending
+    FROM demo_orders o WHERE o.scenario_id=$1 ORDER BY o.created_at DESC,o.id LIMIT 20`,[actor.scenarioId])).rows;
+  return {namespace:'DEMO_ONLY' as const,outcomes:SIMULATED_OUTCOMES,orders:rows.map(r=>({id:r.id as string,state:r.state as string,quantity:r.quantity as number,allocatedQuantity:r.allocated_quantity as number,
+    payablePaise:String(r.payable_paise),payment:(r.payment??null) as string|null,refundsPending:r.refunds_pending as number,
+    reservedUntil:r.reserved_until?new Date(r.reserved_until).toISOString():null,createdAt:new Date(r.created_at).toISOString()}))};
+}

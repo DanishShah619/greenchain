@@ -56,6 +56,11 @@ test('a buyer browses, orders, pays through the simulator and owns the credits; 
     const done=(await f.send('GET',`/api/v1/orders/${order.order.id}`,buyer)).json();
     assert.equal(done.order.state,'FULFILLED');assert.equal(done.purchased.length,20);
     assert.equal((await f.send('GET','/api/v1/orders',buyer)).json().orders[0].state,'FULFILLED');
+    // The presenter sees the scenario's orders (to drive the simulator from a second window), without farmer data.
+    const listed=(await f.send('GET','/api/v1/demo/orders',presenter)).json();
+    assert.equal(listed.orders[0].id,order.order.id);assert.equal(listed.orders[0].payment,'SUCCEEDED');assert.ok(listed.outcomes.includes('late_success'));
+    assert.doesNotMatch(JSON.stringify(listed),/Market seed farmer|Synthetic village/);
+    assert.equal((await f.send('GET','/api/v1/demo/orders',buyer)).statusCode,403);
     assert.deepEqual(await assertMarketInvariants(f.db),[]);
   }finally{await f.close();}
 });
@@ -143,6 +148,7 @@ test('without a webhook secret neither the webhook nor the simulator exists; wit
   try{
     const presenter=await live.login('presenter');
     assert.equal((await live.send('POST',`/api/v1/demo/orders/${randomUUID()}/simulate`,presenter,{outcome:'success'})).statusCode,404);
+    assert.equal((await live.send('GET','/api/v1/demo/orders',presenter)).statusCode,404);
   }finally{await live.close();}
 });
 test('market configuration from the environment is validated',()=>{
@@ -162,4 +168,17 @@ test('the demo market seed is idempotent and leaves sold credits alone',async()=
   assert.equal((await db.query(`SELECT count(*)::int AS n FROM demo_credits`)).rows[0].n,200);
   assert.equal((await db.query(`SELECT count(*)::int AS n FROM demo_credits WHERE state='REVERSED'`)).rows[0].n,20,'existing state preserved');
   assert.equal((await db.query(`SELECT count(*)::int AS n FROM demo_price_list`)).rows[0].n,1);
+});
+test('CORS preflight allows every method the web app uses (sign-out is DELETE, boundary and chunk uploads are PUT)',async()=>{
+  const f=await fixture();
+  try{
+    for(const [method,url] of [['DELETE','/api/v1/session'],['PUT','/api/v1/uploads/x/chunks/0'],['POST','/api/v1/orders']] as const){
+      const r=await f.app.inject({method:'OPTIONS',url,headers:{origin,'access-control-request-method':method,'access-control-request-headers':'content-type,x-csrf-token'}});
+      assert.equal(r.statusCode,204);
+      assert.ok(String(r.headers['access-control-allow-methods']).split(/,\s*/).includes(method),`${method} ${url}: ${r.headers['access-control-allow-methods']}`);
+      assert.equal(r.headers['access-control-allow-origin'],origin);
+    }
+    const other=await f.app.inject({method:'OPTIONS',url:'/api/v1/session',headers:{origin:'https://evil.example','access-control-request-method':'DELETE'}});
+    assert.notEqual(other.headers['access-control-allow-origin'],'https://evil.example','other origins are still refused');
+  }finally{await f.close();}
 });
