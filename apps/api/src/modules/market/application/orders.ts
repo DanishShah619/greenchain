@@ -15,10 +15,12 @@ const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const sha=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const money=(value:unknown)=>BigInt(String(value));
 const iso=(value:unknown)=>value?new Date(value as string).toISOString():null;
+/** The exact terms a buyer accepts before paying: price, quantity, amount, commission and tax rule. */
+export const snapshotHash=(order:Record<string,any>)=>sha(['order.snapshot.v1',order.id,String(order.unit_price_paise),order.allocated_quantity,String(order.payable_paise),order.commission_bps,order.tax_rule]);
 /** A pseudonymous, stable label for a farmer group. Buyers never see names, villages or areas. */
 export const groupLabel=(groupId:string)=>`Group ${createHash('sha256').update(`group:${groupId}`).digest('hex').slice(0,6).toUpperCase()}`;
-const systemActor=(scenarioId:string):Actor=>({id:'system:market',scenarioId,role:'system'});
-function requireBuyer(actor:Actor){if(actor.role!=='buyer')throw new WorkflowError('FORBIDDEN',403);}
+export const systemActor=(scenarioId:string):Actor=>({id:'system:market',scenarioId,role:'system'});
+export function requireBuyer(actor:Actor){if(actor.role!=='buyer')throw new WorkflowError('FORBIDDEN',403);}
 const isUniqueViolation=(error:unknown)=>(error as {code?:unknown})?.code==='23505';
 export type CreateOrderInput={requestId:string;quantity:number;quotedTotalPaise?:string};
 function validate(input:CreateOrderInput){
@@ -31,7 +33,7 @@ async function audit(tx:Database,actor:Actor,anchorCapture:string|undefined,even
   if(anchorCapture)await appendAudit(tx,actor,anchorCapture,event,facts);
 }
 /** The case behind the order's lowest credit id, over every generation of holds. */
-async function orderAnchor(tx:Database,orderId:string):Promise<string|undefined>{
+export async function orderAnchor(tx:Database,orderId:string):Promise<string|undefined>{
   return (await tx.query('SELECT group_id FROM demo_order_items WHERE order_id=$1 ORDER BY credit_id LIMIT 1',[orderId])).rows[0]?.group_id;
 }
 async function priceAt(tx:Database,scenarioId:string,asOf:Date){
@@ -106,11 +108,14 @@ export async function reapExpired(tx:Database,scenarioId:string,asOf:Date,config
 }
 export type OrderView=Awaited<ReturnType<typeof orderView>>;
 /** The buyer's view, rebuilt from stored rows (never recomputed). Contains no farmer data. */
-async function orderView(tx:Database,order:Record<string,any>,extra:{replayed:boolean;quotedTotalPaise?:string}){
+export async function orderView(tx:Database,order:Record<string,any>,extra:{replayed:boolean;quotedTotalPaise?:string}){
   const items=(await tx.query(`SELECT credit_id,group_id,active FROM demo_order_items WHERE order_id=$1 AND generation=(SELECT max(generation) FROM demo_order_items WHERE order_id=$1) ORDER BY credit_id`,[order.id])).rows;
   const log=(await tx.query('SELECT revision,as_of,cap_basis_q,detail FROM demo_allocation_log WHERE order_id=$1 ORDER BY revision DESC LIMIT 1',[order.id])).rows[0];
   const detail=log?(typeof log.detail==='string'?JSON.parse(log.detail):log.detail):null;
   const unitPrice=money(order.unit_price_paise);
+  const attempts=(await tx.query('SELECT id,state,amount_paise,mismatch,created_at FROM demo_payment_attempts WHERE order_id=$1 ORDER BY created_at,id',[order.id])).rows;
+  const refunds=(await tx.query('SELECT kind,state,amount_paise FROM demo_payment_refunds WHERE order_id=$1 ORDER BY created_at,id',[order.id])).rows;
+  const ledger=(await tx.query('SELECT credit_id,gross_paise FROM demo_ledger_entries WHERE order_id=$1 ORDER BY credit_id',[order.id])).rows;
   return {
     namespace:'DEMO_ONLY' as const,replayed:extra.replayed,
     priceChangedFromQuote:extra.quotedTotalPaise!==undefined&&extra.quotedTotalPaise!==String(unitPrice*BigInt(order.quantity)),
@@ -119,13 +124,17 @@ async function orderView(tx:Database,order:Record<string,any>,extra:{replayed:bo
       payablePaise:String(order.payable_paise),commissionBps:order.commission_bps as number,priceEffectiveFrom:iso(order.price_effective_from),
       reservedUntil:iso(order.reserved_until),allocatedAt:iso(order.allocated_at),shortfallReason:(order.shortfall_reason??null) as string|null,
       version:order.version as number,createdAt:iso(order.created_at)},
+    snapshotHash:snapshotHash(order),
     items:items.map(i=>({creditId:i.credit_id as string,group:groupLabel(i.group_id),active:i.active as boolean})),
+    payments:attempts.map(a=>({id:a.id as string,state:a.state as string,amountPaise:String(a.amount_paise),mismatch:a.mismatch as boolean,createdAt:iso(a.created_at)})),
+    refunds:refunds.map(r=>({kind:r.kind as string,state:r.state as string,amountPaise:String(r.amount_paise)})),
+    purchased:ledger.map(l=>({creditId:l.credit_id as string,pricePaise:String(l.gross_paise)})),
     allocation:detail?{revision:log.revision as number,asOf:iso(log.as_of),capBasisQuantity:log.cap_basis_q as number,cap:detail.cap as number,ok:detail.ok as boolean,
       reason:(detail.reason??null) as string|null,offeredCount:(detail.offeredCount??null) as number|null,
       groups:(detail.allocations as {groupId:string;count:number}[]).map(a=>({group:groupLabel(a.groupId),count:a.count}))}:null
   };
 }
-async function ownedOrder(tx:Database,actor:Actor,orderId:string,lock:boolean){
+export async function ownedOrder(tx:Database,actor:Actor,orderId:string,lock:boolean){
   if(typeof orderId!=='string'||!UUID.test(orderId))throw new WorkflowError('NOT_FOUND',404);
   const row=(await tx.query(`SELECT * FROM demo_orders WHERE id=$1 AND scenario_id=$2 AND buyer_id=$3${lock?' FOR UPDATE':''}`,[orderId,actor.scenarioId,actor.id])).rows[0];
   // Another buyer's or another scenario's order is indistinguishable from a missing one.

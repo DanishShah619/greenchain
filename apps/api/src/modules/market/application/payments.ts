@@ -1,0 +1,187 @@
+import {createHash,createHmac,randomUUID,timingSafeEqual} from 'node:crypto';
+import type {Database} from '../../../kernel/database.js';
+import {WorkflowError} from '../../../kernel/errors.js';
+import {appendAudit} from '../../audit/application/audit.js';
+import type {Actor} from '../../capture/application/capture.js';
+import {ledgerLine} from '../domain/money.js';
+import {withScenarioLock} from './lock.js';
+import {DEFAULT_MARKET,orderAnchor,orderView,ownedOrder,reapExpired,requireBuyer,snapshotHash,systemActor,type MarketConfig,type OrderView} from './orders.js';
+/**
+ * Payments (docs/22 §6.1): starting an attempt, and applying signed provider events. The rule that matters most:
+ * an event is recorded in the SAME transaction that applies it, as the last write, so a rolled-back apply leaves no trace and
+ * the provider's redelivery is applied from scratch.
+ */
+export type PaymentConfig={
+  provider:string;
+  /** Current and previous webhook secrets (rotation). Never logged. */
+  secrets:string[];
+  toleranceSeconds:number;
+  /** A PENDING confirmation extends the reservation to now + this, capped at allocated_at + maxHoldSeconds. */
+  pendingExtensionSeconds:number;maxHoldSeconds:number;
+  maxBodyBytes:number;
+};
+export const DEFAULT_PAYMENTS:Omit<PaymentConfig,'secrets'>={provider:'simulator',toleranceSeconds:300,pendingExtensionSeconds:900,maxHoldSeconds:1800,maxBodyBytes:16384};
+export const EVENT_TYPES=['payment.pending','payment.succeeded','payment.failed','payment.cancelled'] as const;
+export type ProviderEvent={id:string;type:typeof EVENT_TYPES[number];providerRef:string;amountPaise:bigint;currency:string};
+export type PaymentOutcome='FULFILLED'|'REVALIDATED_FULFILLED'|'REFUND_LATE_UNFILLABLE'|'REFUND_DUPLICATE_ATTEMPT'|'AMOUNT_MISMATCH'|'ATTEMPT_UPDATED'|'IGNORED_SAME_ATTEMPT'|'IGNORED_TERMINAL';
+export type WebhookResult={status:200|400|401|404|409|413|503;code?:string;outcome?:PaymentOutcome;replayed?:boolean};
+export type RawWebhook={body:Buffer;signature?:string;timestamp?:string};
+const sha256=(data:Buffer|string)=>createHash('sha256').update(data).digest('hex');
+const money=(value:unknown)=>BigInt(String(value));
+/** The signature a provider (or the simulator) sends: HMAC-SHA256 over "timestamp.rawBody", hex. */
+export const signWebhook=(secret:string,timestamp:string,body:Buffer|string)=>createHmac('sha256',secret).update(`${timestamp}.`).update(body).digest('hex');
+/** Pure check of size, timestamp window and signature, then strict parsing. No database access, so nothing can be written on failure. */
+export function verifyWebhook(raw:RawWebhook,config:PaymentConfig,nowMs=Date.now()):{ok:true;event:ProviderEvent}|{ok:false;status:400|401|413;code:string}{
+  if(raw.body.length>config.maxBodyBytes)return {ok:false,status:413,code:'WEBHOOK_TOO_LARGE'};
+  const ts=raw.timestamp??'',sig=raw.signature??'';
+  if(!/^[0-9]{1,12}$/.test(ts)||!/^[0-9a-f]{64}$/.test(sig)||!config.secrets.length)return {ok:false,status:401,code:'WEBHOOK_SIGNATURE'};
+  if(Math.abs(nowMs/1000-Number(ts))>config.toleranceSeconds)return {ok:false,status:401,code:'WEBHOOK_TIMESTAMP'};
+  const given=Buffer.from(sig,'hex');
+  const valid=config.secrets.some(secret=>timingSafeEqual(Buffer.from(signWebhook(secret,ts,raw.body),'hex'),given));
+  if(!valid)return {ok:false,status:401,code:'WEBHOOK_SIGNATURE'};
+  let body:any;try{body=JSON.parse(raw.body.toString('utf8'));}catch{return {ok:false,status:400,code:'WEBHOOK_PAYLOAD'};}
+  const ok=body&&typeof body==='object'&&typeof body.id==='string'&&/^[A-Za-z0-9_.:-]{1,100}$/.test(body.id)&&EVENT_TYPES.includes(body.type)
+    &&typeof body.providerRef==='string'&&/^[A-Za-z0-9_.:-]{1,100}$/.test(body.providerRef)&&typeof body.amountPaise==='string'&&/^[0-9]{1,18}$/.test(body.amountPaise)&&typeof body.currency==='string'&&body.currency.length<=8;
+  if(!ok)return {ok:false,status:400,code:'WEBHOOK_PAYLOAD'};
+  return {ok:true,event:{id:body.id,type:body.type,providerRef:body.providerRef,amountPaise:BigInt(body.amountPaise),currency:body.currency}};
+}
+/**
+ * Start (or resume) payment for a reserved order. The buyer must echo the order's snapshot hash, proving they accepted the
+ * exact price, quantity and amount. One open attempt at a time; asking again returns it.
+ */
+export async function startPaymentAttempt(db:Database,actor:Actor,orderId:string,input:{acceptSnapshotHash:string},market:MarketConfig=DEFAULT_MARKET,provider='simulator'):Promise<OrderView&{attemptId:string;providerRef:string}>{
+  requireBuyer(actor);
+  return withScenarioLock(db,actor.scenarioId,async(tx,asOf)=>{
+    await ownedOrder(tx,actor,orderId,false);
+    await reapExpired(tx,actor.scenarioId,asOf,market);
+    const order=await ownedOrder(tx,actor,orderId,true);
+    if(!['RESERVED','AWAITING_PAYMENT'].includes(order.state))throw new WorkflowError('ORDER_NOT_PAYABLE');
+    if(input?.acceptSnapshotHash!==snapshotHash(order))throw new WorkflowError('SNAPSHOT_MISMATCH');
+    const open=(await tx.query(`SELECT id,provider_ref FROM demo_payment_attempts WHERE order_id=$1 AND state IN ('CREATED','PENDING') ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,[order.id])).rows[0];
+    if(open)return {...await orderView(tx,order,{replayed:true}),attemptId:open.id,providerRef:open.provider_ref};
+    const id=randomUUID(),providerRef=`sim_${id.replace(/-/g,'')}`;
+    await tx.query(`INSERT INTO demo_payment_attempts(id,order_id,scenario_id,provider,provider_ref,state,amount_paise,snapshot_hash) VALUES ($1,$2,$3,$4,$5,'CREATED',$6,$7)`,
+      [id,order.id,actor.scenarioId,provider,providerRef,String(order.payable_paise),snapshotHash(order)]);
+    const updated=order.state==='RESERVED'?(await tx.query(`UPDATE demo_orders SET state='AWAITING_PAYMENT',version=version+1 WHERE id=$1 RETURNING *`,[order.id])).rows[0]:order;
+    const anchor=await orderAnchor(tx,order.id);if(anchor)await appendAudit(tx,actor,anchor,'market.payment.started',{orderId:order.id,attemptId:id,amountPaise:String(order.payable_paise)});
+    return {...await orderView(tx,updated,{replayed:false}),attemptId:id,providerRef};
+  });
+}
+type Locked={order:Record<string,any>;attempt:Record<string,any>;items:Record<string,any>[];credits:Map<string,Record<string,any>>;generation:number};
+async function lockForPayment(tx:Database,orderId:string,attemptId:string):Promise<Locked>{
+  // Lock order: (scenario, already held) -> order -> attempt -> credits ascending id.
+  const order=(await tx.query('SELECT * FROM demo_orders WHERE id=$1 FOR UPDATE',[orderId])).rows[0];
+  const attempt=(await tx.query('SELECT * FROM demo_payment_attempts WHERE id=$1 FOR UPDATE',[attemptId])).rows[0];
+  const generation=Number((await tx.query('SELECT coalesce(max(generation),0) AS g FROM demo_order_items WHERE order_id=$1',[orderId])).rows[0].g);
+  const items=(await tx.query('SELECT credit_id,group_id,active FROM demo_order_items WHERE order_id=$1 AND generation=$2 ORDER BY credit_id',[orderId,generation])).rows;
+  const rows=(await tx.query('SELECT id,state,reserved_order_id FROM demo_credits WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[items.map(i=>i.credit_id)])).rows;
+  return {order,attempt,items,generation,credits:new Map(rows.map(r=>[r.id,r]))};
+}
+const ownershipIntact=(l:Locked)=>['RESERVED','AWAITING_PAYMENT'].includes(l.order.state)&&l.items.length===l.order.allocated_quantity&&l.items.length>0
+  &&l.items.every(i=>i.active&&l.credits.get(i.credit_id)?.state==='RESERVED'&&l.credits.get(i.credit_id)?.reserved_order_id===l.order.id);
+async function refund(tx:Database,l:Locked,kind:'LATE_UNFILLABLE'|'DUPLICATE_ATTEMPT'|'AMOUNT_MISMATCH',amount:bigint){
+  if(amount<=0n)return;
+  await tx.query(`INSERT INTO demo_payment_refunds(order_id,attempt_id,scenario_id,kind,amount_paise) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (attempt_id,kind) DO NOTHING`,[l.order.id,l.attempt.id,l.order.scenario_id,kind,String(amount)]);
+}
+const succeed=(tx:Database,attemptId:string,mismatch=false)=>tx.query(`UPDATE demo_payment_attempts SET state='SUCCEEDED',mismatch=$2 WHERE id=$1 AND state<>'SUCCEEDED'`,[attemptId,mismatch]);
+/** Credits SOLD, one ledger line each, group waiting reset, attempt SUCCEEDED, order FULFILLED (docs/22 §6.1 step 4). */
+async function fulfil(tx:Database,l:Locked,creditIds:string[],groups:string[],asOf:Date){
+  const unitPrice=money(l.order.unit_price_paise),line=ledgerLine(unitPrice,l.order.commission_bps);
+  await tx.query(`UPDATE demo_credits SET state='SOLD' WHERE id=ANY($1::text[])`,[creditIds]);
+  await tx.query(`INSERT INTO demo_ledger_entries(order_id,scenario_id,credit_id,payee_group_id,gross_paise,commission_paise,net_paise) SELECT $1,$2,x.c,x.g,$5,$6,$7 FROM unnest($3::text[],$4::uuid[]) AS x(c,g)`,
+    [l.order.id,l.order.scenario_id,creditIds,groups,String(line.gross),String(line.commission),String(line.net)]);
+  await tx.query(`INSERT INTO demo_group_state(scenario_id,group_id,last_allocated_at) SELECT $1,g,$3 FROM unnest($2::uuid[]) AS g ON CONFLICT (scenario_id,group_id) DO UPDATE SET last_allocated_at=EXCLUDED.last_allocated_at`,
+    [l.order.scenario_id,[...new Set(groups)],asOf]);
+  await succeed(tx,l.attempt.id);
+  await tx.query(`UPDATE demo_orders SET state='FULFILLED',version=version+1 WHERE id=$1`,[l.order.id]);
+}
+async function apply(tx:Database,ev:ProviderEvent,l:Locked,asOf:Date,config:PaymentConfig):Promise<PaymentOutcome>{
+  const {order,attempt}=l,success=ev.type==='payment.succeeded';
+  if(success){
+    // Checked first so that no branch can strand captured money: a wrong amount is refunded, whatever state the order is in.
+    if(ev.amountPaise!==money(attempt.amount_paise)||ev.currency!=='INR'||money(attempt.amount_paise)!==money(order.payable_paise)){
+      await succeed(tx,attempt.id,true);await refund(tx,l,'AMOUNT_MISMATCH',ev.amountPaise);return 'AMOUNT_MISMATCH';
+    }
+    // The same charge reported again (a new event id for an already successful attempt) is not a second payment.
+    if(attempt.state==='SUCCEEDED')return 'IGNORED_SAME_ATTEMPT';
+  }else{
+    if(!['CREATED','PENDING'].includes(attempt.state))return 'IGNORED_TERMINAL';
+    const next=ev.type==='payment.pending'?'PENDING':ev.type==='payment.failed'?'FAILED':'CANCELLED';
+    await tx.query('UPDATE demo_payment_attempts SET state=$2 WHERE id=$1',[attempt.id,next]);
+    if(next==='PENDING'&&['RESERVED','AWAITING_PAYMENT'].includes(order.state)&&order.allocated_at){
+      const cap=new Date(order.allocated_at).getTime()+config.maxHoldSeconds*1000;
+      const until=Math.min(Math.max(new Date(order.reserved_until).getTime(),asOf.getTime()+config.pendingExtensionSeconds*1000),cap);
+      await tx.query('UPDATE demo_orders SET reserved_until=$2 WHERE id=$1',[order.id,new Date(until)]);
+    }
+    return 'ATTEMPT_UPDATED';
+  }
+  // A different attempt succeeding after the order is settled is a double charge: refund it, leave the order alone.
+  if(['FULFILLED','REFUND_PENDING','REFUNDED'].includes(order.state)){
+    await succeed(tx,attempt.id);await refund(tx,l,'DUPLICATE_ATTEMPT',ev.amountPaise);return 'REFUND_DUPLICATE_ATTEMPT';
+  }
+  // Ownership intact, even if reserved_until has passed but the reaper has not run: the payment is honoured.
+  if(ownershipIntact(l)){await fulfil(tx,l,l.items.map(i=>i.credit_id),l.items.map(i=>i.group_id),asOf);return 'FULFILLED';}
+  if(!['RESERVED','AWAITING_PAYMENT','EXPIRED','CANCELLED'].includes(order.state))throw new WorkflowError('PAYMENT_ORDER_STATE',503);
+  // Late success (expired, cancelled, or holds gone): re-reserve the SAME credits, all or nothing; otherwise refund in full.
+  await tx.query(`UPDATE demo_orders SET state='REVALIDATING',version=version+1 WHERE id=$1`,[order.id]);
+  const ids=l.items.map(i=>i.credit_id),groups=l.items.map(i=>i.group_id);
+  if(ids.length&&ids.every(id=>l.credits.get(id)?.state==='AVAILABLE')){
+    await tx.query(`INSERT INTO demo_order_items(order_id,scenario_id,credit_id,group_id,generation) SELECT $1,$2,x.c,x.g,$5 FROM unnest($3::text[],$4::uuid[]) AS x(c,g)`,[order.id,order.scenario_id,ids,groups,l.generation+1]);
+    await tx.query(`UPDATE demo_credits SET state='RESERVED',reserved_order_id=$1 WHERE id=ANY($2::text[])`,[order.id,ids]);
+    await fulfil(tx,l,ids,groups,asOf);return 'REVALIDATED_FULFILLED';
+  }
+  await succeed(tx,attempt.id);
+  await tx.query(`UPDATE demo_orders SET state='REFUND_PENDING',version=version+1 WHERE id=$1`,[order.id]);
+  await refund(tx,l,'LATE_UNFILLABLE',ev.amountPaise);return 'REFUND_LATE_UNFILLABLE';
+}
+const isUniqueViolation=(error:unknown)=>(error as {code?:unknown})?.code==='23505';
+/**
+ * Webhook entry point. Must be called with no transaction open (it takes the scenario lock itself).
+ * 200 = applied or already applied (idempotent); 401/413/400 = rejected before any write; 404 = unknown attempt, nothing written;
+ * 409 = the event id was reused with a different body; 503 = the apply failed and was rolled back, so the provider should retry.
+ */
+export async function handlePaymentEvent(db:Database,raw:RawWebhook,config:PaymentConfig,nowMs=Date.now()):Promise<WebhookResult>{
+  const verified=verifyWebhook(raw,config,nowMs);
+  if(!verified.ok)return {status:verified.status,code:verified.code};
+  const ev=verified.event,payloadHash=sha256(raw.body);
+  // Immutable columns, so an unlocked read is enough to find the scenario lock to take.
+  const target=(await db.query('SELECT id,order_id,scenario_id FROM demo_payment_attempts WHERE provider=$1 AND provider_ref=$2',[config.provider,ev.providerRef])).rows[0];
+  if(!target)return {status:404,code:'PAYMENT_UNMATCHED'};
+  const stored=async(tx:Database):Promise<WebhookResult|undefined>=>{
+    const prior=(await tx.query('SELECT payload_hash,outcome FROM demo_payment_events WHERE provider=$1 AND provider_event_id=$2',[config.provider,ev.id])).rows[0];
+    if(!prior)return undefined;
+    return prior.payload_hash===payloadHash?{status:200,outcome:prior.outcome,replayed:true}:{status:409,code:'EVENT_REUSE'};
+  };
+  try{
+    return await withScenarioLock(db,target.scenario_id,async(tx,asOf)=>{
+      const prior=await stored(tx);if(prior)return prior;
+      const locked=await lockForPayment(tx,target.order_id,target.id);
+      const outcome=await apply(tx,ev,locked,asOf,config);
+      if(outcome!=='IGNORED_SAME_ATTEMPT'&&outcome!=='IGNORED_TERMINAL'){
+        const anchor=await orderAnchor(tx,target.order_id);
+        if(anchor)await appendAudit(tx,systemActor(target.scenario_id),anchor,'market.payment.applied',{orderId:target.order_id,attemptId:target.id,eventId:ev.id,type:ev.type,outcome});
+      }
+      // Last write of the transaction: the event is only ever recorded together with its effect.
+      await tx.query(`INSERT INTO demo_payment_events(provider,provider_event_id,attempt_id,scenario_id,type,payload_hash,amount_paise,outcome) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [config.provider,ev.id,target.id,target.scenario_id,ev.type,payloadHash,String(ev.amountPaise),outcome]);
+      return {status:200,outcome};
+    });
+  }catch(error){
+    if(isUniqueViolation(error)){const prior=await db.transaction(stored);if(prior)return prior;}
+    return {status:503,code:error instanceof WorkflowError?error.code:'PAYMENT_APPLY_FAILED'};
+  }
+}
+/** Settle pending refunds (the simulator's provider confirmation), then close orders whose refunds are all settled. */
+export async function settleRefunds(db:Database,scenarioId:string){
+  return withScenarioLock(db,scenarioId,async tx=>{
+    const orders=(await tx.query(`SELECT id FROM demo_orders WHERE scenario_id=$1 AND state='REFUND_PENDING' ORDER BY id FOR UPDATE`,[scenarioId])).rows.map(r=>r.id as string);
+    const settled=(await tx.query(`UPDATE demo_payment_refunds SET state='REFUNDED' WHERE scenario_id=$1 AND state='PENDING' RETURNING order_id`,[scenarioId])).rows.length;
+    let closed=0;
+    for(const id of orders){
+      if((await tx.query(`SELECT 1 FROM demo_payment_refunds WHERE order_id=$1 AND state='PENDING'`,[id])).rows.length)continue;
+      await tx.query(`UPDATE demo_orders SET state='REFUNDED',version=version+1 WHERE id=$1`,[id]);closed++;
+      const anchor=await orderAnchor(tx,id);if(anchor)await appendAudit(tx,systemActor(scenarioId),anchor,'market.order.refunded',{orderId:id});
+    }
+    return {settled,closed};
+  });
+}
