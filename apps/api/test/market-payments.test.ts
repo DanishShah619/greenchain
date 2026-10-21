@@ -167,7 +167,7 @@ test('webhook authentication: signature over timestamp and raw body, a tolerance
   assert.equal((await send({body:notJson,timestamp:ts,signature:signWebhook(config.secrets[0],ts,notJson)})).status,400);
   assert.equal(await count(db,'SELECT count(*)::int AS n FROM demo_payment_events'),0,'nothing recorded for rejected deliveries');
   const unknown=eventBody({id:'evt_unknown',type:'payment.succeeded',providerRef:'sim_nobody',amountPaise:1n,currency:'INR'});
-  assert.deepEqual(await send({body:unknown,timestamp:ts,signature:signWebhook(config.secrets[0],ts,unknown)}),{status:404,code:'PAYMENT_UNMATCHED'});
+  assert.deepEqual(await send({body:unknown,timestamp:ts,signature:signWebhook(config.secrets[0],ts,unknown)}),{status:404,code:'PAYMENT_UNMATCHED',eventId:'evt_unknown'});
   // The previous secret still verifies during rotation.
   assert.equal((await send({body,timestamp:ts,signature:signWebhook(config.secrets[1],ts,body)})).outcome,'FULFILLED');
 });
@@ -177,7 +177,7 @@ test('if applying fails, nothing is recorded and the redelivered event is applie
   await db.query(`CREATE FUNCTION test_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected fault'; END; $$`);
   await db.query('CREATE TRIGGER test_fault BEFORE INSERT ON demo_ledger_entries FOR EACH ROW EXECUTE FUNCTION test_fault()');
   const id='evt_retry';
-  assert.deepEqual(await deliver(db,providerRef,'payment.succeeded',{id}),{status:503,code:'PAYMENT_APPLY_FAILED'});
+  assert.deepEqual(await deliver(db,providerRef,'payment.succeeded',{id}),{status:503,code:'PAYMENT_APPLY_FAILED',eventId:id});
   assert.equal(await count(db,'SELECT count(*)::int AS n FROM demo_payment_events'),0,'the event is not recorded');
   assert.equal((await getOrder(db,b1,order.order.id)).order.state,'AWAITING_PAYMENT');
   await db.query('DROP TRIGGER test_fault ON demo_ledger_entries');

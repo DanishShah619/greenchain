@@ -76,9 +76,10 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
 
 ## Buyer purchase slice (in progress)
 
-- Spec: [document 22](22-demo-buyer-purchase.md), design-reviewed and approved. Build steps 1-4 are implemented: schema and database guards (migrations `0005`, `0006`), FCAE v0 allocation and half-even commission, the order service (scenario lock, reservations, shortfall offers, reaper), payments (signed webhook with every decision branch, refunds, deterministic simulator), and HTTP routes with a seeded buyer account and a 20 x 10 demo market.
-- Validation: 103 PGlite tests and 15 real-PostgreSQL race tests pass; the races and key guards were mutation-checked (removing the lock, the event-recording order, the same-attempt or mismatch branch, or the active-hold index turns the matching test red). A live smoke against a throwaway database ran the full journey (inventory, 20-credit order, payment, replayed callback with an unchanged ledger, forged webhook rejected); the server log had no errors and no secrets.
-- Remaining: worker sweep, market metrics and the invariant check (step 5), and buyer screens (step 6).
+- Spec: [document 22](22-demo-buyer-purchase.md), design-reviewed and approved. Build steps 1-5 are implemented: schema and database guards (migrations `0005`, `0006`), FCAE v0 allocation and half-even commission, the order service (scenario lock, reservations, shortfall offers, reaper), payments (signed webhook with every decision branch, refunds, deterministic simulator), and HTTP routes with a seeded buyer account and a 20 x 10 demo market.
+- Validation (after step 5): 111 PGlite tests and 15 real-PostgreSQL race tests pass; the races and key guards were mutation-checked (removing the lock, the event-recording order, the same-attempt or mismatch branch, or the active-hold index turns the matching test red). A live smoke against a throwaway database ran the full journey (inventory, 20-credit order, payment, replayed callback with an unchanged ledger, forged webhook rejected); the server log had no errors and no secrets.
+- Step 5: the worker sweeps the market (reaper backstop, delayed refund settlement, scheduled invariant check with a violation gauge) and exports market gauges; the API counts webhook and order outcomes and scenario-lock waits on an optional loopback metrics port. A live run of API and worker against a throwaway database expired a lapsed order within seconds; both logs were clean and secret-free.
+- Remaining: buyer screens (step 6).
 
 ## Remaining release work
 

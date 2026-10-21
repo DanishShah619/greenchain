@@ -12,6 +12,8 @@ import {amoyFromEnvironment} from '../src/modules/chain/infrastructure/evm.js';
 import {seedDemoMarket} from '../src/modules/market/application/seed.js';
 import {DEFAULT_MARKET} from '../src/modules/market/application/orders.js';
 import {DEFAULT_PAYMENTS} from '../src/modules/market/application/payments.js';
+import {DEFAULT_SWEEP,marketSweep,newSweepState} from '../src/modules/market/application/sweep.js';
+const sweepState=newSweepState();
 const folder=resolve('../../.local');
 await mkdir(folder,{recursive:true});
 const auditPath=resolve(folder,'audit-hmac-key.txt');
@@ -63,7 +65,8 @@ await seedDemoMarket(db,{scenarioId:'presenter'});
 const app=await buildApp(db,{origin:'http://localhost:3000',secure:false,market:{market:DEFAULT_MARKET,payments:{...DEFAULT_PAYMENTS,secrets:[webhook.value.padEnd(32,'.')]},demoMode:true}});
 const chain=await amoyFromEnvironment();
 let stopped=false,timer:ReturnType<typeof setTimeout>|undefined,inFlight:Promise<void>=Promise.resolve();
-async function cycle(){try{const result=await runChainCycle(db,chain);if('error' in result)app.log.warn({code:result.error},'Chain proof pending');}catch{app.log.error('Audit worker failed; proof submission halted');}finally{if(!stopped)timer=setTimeout(()=>{inFlight=cycle();},2000);}}
+async function cycle(){try{const result=await runChainCycle(db,chain);if('error' in result)app.log.warn({code:result.error},'Chain proof pending');}catch{app.log.error('Audit worker failed; proof submission halted');}
+  try{const swept=await marketSweep(db,{config:DEFAULT_SWEEP,state:sweepState});if(swept.violations?.length)app.log.error({codes:[...new Set(swept.violations.map(v=>v.code))]},'Market invariant violated');}catch{app.log.error('Market sweep failed');}finally{if(!stopped)timer=setTimeout(()=>{inFlight=cycle();},2000);}}
 inFlight=cycle();
 app.addHook('onClose',async()=>{stopped=true;clearTimeout(timer);await inFlight;chain?.close();await pg.close();});
 for(const signal of ['SIGINT','SIGTERM']) process.on(signal,()=>void app.close());

@@ -5,6 +5,7 @@ import type {Database} from '../../../kernel/database.js';
  * states outright; this check is what notices if a guard is ever removed or bypassed.
  */
 export type Violation={code:string;ref:string};
+export const INVARIANT_CODES=['SOLD_WITHOUT_FULFILMENT','RESERVED_WITHOUT_HOLD','HOLD_WITHOUT_CREDIT','HOLD_COUNT_MISMATCH','RELEASED_ORDER_HOLDS','RESERVATION_LAPSED','FULFILLED_TOTALS','FULFILLED_PAYMENT','REFUND_WITH_SALE','GROUP_STATE_WITHOUT_SALE'] as const;
 export async function assertMarketInvariants(db:Database,options:{lapseGraceSeconds?:number}={}):Promise<Violation[]>{
   const grace=options.lapseGraceSeconds??120;
   const checks:[string,string,unknown[]][]=[

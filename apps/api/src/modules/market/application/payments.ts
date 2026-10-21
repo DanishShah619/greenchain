@@ -24,7 +24,8 @@ export const DEFAULT_PAYMENTS:Omit<PaymentConfig,'secrets'>={provider:'simulator
 export const EVENT_TYPES=['payment.pending','payment.succeeded','payment.failed','payment.cancelled'] as const;
 export type ProviderEvent={id:string;type:typeof EVENT_TYPES[number];providerRef:string;amountPaise:bigint;currency:string};
 export type PaymentOutcome='FULFILLED'|'REVALIDATED_FULFILLED'|'REFUND_LATE_UNFILLABLE'|'REFUND_DUPLICATE_ATTEMPT'|'AMOUNT_MISMATCH'|'ATTEMPT_UPDATED'|'IGNORED_SAME_ATTEMPT'|'IGNORED_TERMINAL';
-export type WebhookResult={status:200|400|401|404|409|413|503;code?:string;outcome?:PaymentOutcome;replayed?:boolean};
+export type WebhookResult={status:200|400|401|404|409|413|503;code?:string;outcome?:PaymentOutcome;replayed?:boolean;
+  /** The provider's event id, once the signature is verified. For logs only; never in responses. */eventId?:string};
 export type RawWebhook={body:Buffer;signature?:string;timestamp?:string};
 const sha256=(data:Buffer|string)=>createHash('sha256').update(data).digest('hex');
 const money=(value:unknown)=>BigInt(String(value));
@@ -146,7 +147,7 @@ export async function handlePaymentEvent(db:Database,raw:RawWebhook,config:Payme
   const ev=verified.event,payloadHash=sha256(raw.body);
   // Immutable columns, so an unlocked read is enough to find the scenario lock to take.
   const target=(await db.query('SELECT id,order_id,scenario_id FROM demo_payment_attempts WHERE provider=$1 AND provider_ref=$2',[config.provider,ev.providerRef])).rows[0];
-  if(!target)return {status:404,code:'PAYMENT_UNMATCHED'};
+  if(!target)return {status:404,code:'PAYMENT_UNMATCHED',eventId:ev.id};
   const stored=async(tx:Database):Promise<WebhookResult|undefined>=>{
     const prior=(await tx.query('SELECT payload_hash,outcome FROM demo_payment_events WHERE provider=$1 AND provider_event_id=$2',[config.provider,ev.id])).rows[0];
     if(!prior)return undefined;
@@ -168,14 +169,15 @@ export async function handlePaymentEvent(db:Database,raw:RawWebhook,config:Payme
     });
   }catch(error){
     if(isUniqueViolation(error)){const prior=await db.transaction(stored);if(prior)return prior;}
-    return {status:503,code:error instanceof WorkflowError?error.code:'PAYMENT_APPLY_FAILED'};
+    return {status:503,code:error instanceof WorkflowError?error.code:'PAYMENT_APPLY_FAILED',eventId:ev.id};
   }
 }
 /** Settle pending refunds (the simulator's provider confirmation), then close orders whose refunds are all settled. */
-export async function settleRefunds(db:Database,scenarioId:string){
-  return withScenarioLock(db,scenarioId,async tx=>{
+export async function settleRefunds(db:Database,scenarioId:string,options:{olderThanSeconds?:number}={}){
+  return withScenarioLock(db,scenarioId,async(tx,asOf)=>{
     const orders=(await tx.query(`SELECT id FROM demo_orders WHERE scenario_id=$1 AND state='REFUND_PENDING' ORDER BY id FOR UPDATE`,[scenarioId])).rows.map(r=>r.id as string);
-    const settled=(await tx.query(`UPDATE demo_payment_refunds SET state='REFUNDED' WHERE scenario_id=$1 AND state='PENDING' RETURNING order_id`,[scenarioId])).rows.length;
+    // The worker settles only refunds older than a delay, so REFUND_PENDING stays visible in the demo; the presenter settles all.
+    const settled=(await tx.query(`UPDATE demo_payment_refunds SET state='REFUNDED' WHERE scenario_id=$1 AND state='PENDING' AND created_at<=$2::timestamptz-make_interval(secs=>$3) RETURNING order_id`,[scenarioId,asOf,options.olderThanSeconds??0])).rows.length;
     let closed=0;
     for(const id of orders){
       if((await tx.query(`SELECT 1 FROM demo_payment_refunds WHERE order_id=$1 AND state='PENDING'`,[id])).rows.length)continue;
