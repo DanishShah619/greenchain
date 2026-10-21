@@ -15,11 +15,16 @@ import {registerCalculationReviewRoutes} from '../modules/calculation-review/htt
 import {issue} from '../modules/registry/application/demo.js';
 import {registerDemoRegistryRoutes} from '../modules/registry/http/routes.js';
 import {registerAuditRoutes} from '../modules/audit/http/routes.js';
+import {registerMarketRoutes,WEBHOOK_PATH,type MarketRoutesConfig} from '../modules/market/http/routes.js';
+import {DEFAULT_MARKET} from '../modules/market/application/orders.js';
+import {DEFAULT_PAYMENTS} from '../modules/market/application/payments.js';
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
-export async function buildApp(db: Database, config: {origin:string; secure:boolean; trustProxy?:number}) {
+export async function buildApp(db: Database, config: {origin:string; secure:boolean; trustProxy?:number; market?:MarketRoutesConfig}) {
+  // Without market configuration there is no webhook secret, so the webhook and the simulator are not registered.
+  const market:MarketRoutesConfig=config.market??{market:DEFAULT_MARKET,payments:{...DEFAULT_PAYMENTS,secrets:[]},demoMode:false};
   // trustProxy is the number of trusted reverse-proxy hops (unset = none), so request.ip is the real client address and the login limiter is per client, not per proxy.
   // Typed explicitly so TypeScript keeps the plain HTTP/1 server overload of Fastify() when trustProxy is added.
-  const options:FastifyServerOptions={bodyLimit:16384,trustProxy:config.trustProxy?(_address:string,hop:number)=>hop<config.trustProxy!:false,logger:{redact:['req.headers.cookie','req.headers.authorization','req.headers.x-csrf-token']},ajv:{customOptions:{removeAdditional:false}}};
+  const options:FastifyServerOptions={bodyLimit:16384,trustProxy:config.trustProxy?(_address:string,hop:number)=>hop<config.trustProxy!:false,logger:{redact:['req.headers.cookie','req.headers.authorization','req.headers.x-csrf-token','req.headers.x-greenchain-signature']},ajv:{customOptions:{removeAdditional:false}}};
   const app = Fastify(options);
   await app.register(cookie);
   await app.register(cors,{origin:config.origin,credentials:true});
@@ -33,7 +38,9 @@ export async function buildApp(db: Database, config: {origin:string; secure:bool
   });
   app.addHook('onRequest',async (request,reply) => {
     if(request.url.startsWith('/api/v1/')&&!request.url.startsWith('/api/v1/showcase')&&!request.url.startsWith('/api/v1/health'))reply.header('Cache-Control','no-store');
-    if(['POST','PUT','PATCH','DELETE'].includes(request.method) && request.headers.origin !== config.origin)
+    // The payment provider is a server, not a browser: it sends no Origin and is authenticated by its signature instead.
+    const webhook = request.method==='POST' && request.url.split('?')[0]===WEBHOOK_PATH;
+    if(!webhook && ['POST','PUT','PATCH','DELETE'].includes(request.method) && request.headers.origin !== config.origin)
       return reply.code(403).send({code:'UNTRUSTED_ORIGIN',retryable:false});
   });
   const session = async (token?: string) => {
@@ -46,7 +53,7 @@ export async function buildApp(db: Database, config: {origin:string; secure:bool
     try {await db.query('SELECT 1'); return {status:'ready',demo:true};}
     catch {return reply.code(503).send({status:'unavailable'});}
   });
-  app.post<{Body:{password:string;account?:'presenter'|'verifier'}}>('/api/v1/session', {schema:{body:{type:'object',additionalProperties:false,required:['password'],properties:{password:{type:'string',minLength:1,maxLength:256},account:{enum:['presenter','verifier']}}}}},async (request,reply) => {
+  app.post<{Body:{password:string;account?:'presenter'|'buyer'|'verifier'}}>('/api/v1/session', {schema:{body:{type:'object',additionalProperties:false,required:['password'],properties:{password:{type:'string',minLength:1,maxLength:256},account:{enum:['presenter','buyer','verifier']}}}}},async (request,reply) => {
     // Only failed attempts count; a successful login clears the counter, so legitimate users sharing an address are not locked out by their own successes.
     const recent = (await db.query(`SELECT attempts FROM login_attempts WHERE ip=$1 AND window_start>=now()-interval '15 minutes'`,[request.ip])).rows[0];
     if(recent && recent.attempts>=10) return reply.header('Retry-After','900').code(429).send({code:'RATE_LIMITED',retryable:true});
@@ -81,6 +88,7 @@ export async function buildApp(db: Database, config: {origin:string; secure:bool
   app.get('/api/v1/captures',async (request,reply) => {
     const user=await session(request.cookies.session);
     if(!user) return reply.code(401).send({code:'LOGIN_REQUIRED',retryable:false});
+    if(user.role!=='agent') return reply.code(403).send({code:'FORBIDDEN',retryable:false});
     return {captures:(await db.query(`SELECT c.event_id,c.farmer_label,c.village,c.area_hectares,c.status,c.onboarding,r.state AS review_state,p.area_hectares AS calculated_area
       FROM captures c LEFT JOIN review_cases r ON r.scenario_id=c.scenario_id AND r.capture_id=c.event_id LEFT JOIN plots p ON p.scenario_id=c.scenario_id AND p.capture_id=c.event_id
       WHERE c.scenario_id=$1 AND c.actor_id=$2 ORDER BY c.created_at DESC,c.event_id LIMIT 50`,[user.scenario_id,user.id])).rows};
@@ -111,5 +119,6 @@ export async function buildApp(db: Database, config: {origin:string; secure:bool
   await registerCalculationReviewRoutes(app,db,resolveActor,{case:approvedDemoInputs,candidate,approve:approveCandidate,issue});
   await registerDemoRegistryRoutes(app,db,resolveActor,requireCase);
   await registerAuditRoutes(app,db,resolveActor,requireCase);
+  await registerMarketRoutes(app,db,resolveActor,market);
   return app;
 }

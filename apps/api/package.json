@@ -13,7 +13,7 @@
     "contracts:compile": "node scripts/compile-contract.mjs",
     "test": "node --v8-pool-size=1 --import tsx --test --test-concurrency=1 test/*.test.ts",
     "test:pg": "node --v8-pool-size=1 --import tsx --test --test-concurrency=1 test/pg/*.test.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.check.json",
     "build": "tsc"
   },
   "dependencies": {

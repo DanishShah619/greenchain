@@ -31,7 +31,7 @@ Last updated: 2026-10-14 · Version: docs v2 (draft) · Maintainer: project team
 | 22 | [docs/18-field-evidence-review.md](docs/18-field-evidence-review.md) | Boundary geometry, resumable proof uploads and separate evidence review | Demo slice implemented |
 | 23 | [docs/19-demo-calculations.md](docs/19-demo-calculations.md) | Versioned synthetic scenarios, fixed-scale trace, immutable results and scope gates | Demo calculations implemented |
 | 24 | [docs/20-demo-review-issuance.md](docs/20-demo-review-issuance.md) | Exact calculation basis, independent review and transactional demo credits/buffer/carry | Demo issuance implemented |
-| 25 | [docs/22-demo-buyer-purchase.md](docs/22-demo-buyer-purchase.md) | Buyer slice: marketplace, FCAE v0 reservation, simulated payment, fulfilment, failure modes and test plan | Approved; steps 1-3 (schema, allocation, orders, payments) implemented |
+| 25 | [docs/22-demo-buyer-purchase.md](docs/22-demo-buyer-purchase.md) | Buyer slice: marketplace, FCAE v0 reservation, simulated payment, fulfilment, failure modes and test plan | Approved; steps 1-4 (schema, allocation, orders, payments, routes and seed) implemented |
 
 Application setup and local preview commands: [README.md](README.md).
 

@@ -74,6 +74,12 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
 - The worker logs structured JSON, exposes `/healthz` and `/metrics`, writes a heartbeat, survives pool and cycle errors, and retries failed proofs with bounded backoff into a `FAILED` state that an operator requeues.
 - Real-Postgres suite (`npm run test:pg`, compose database, throwaway database per file) covers the upload-quota race, competing approvals, lease claim/expiry fencing, concurrent chainers and concurrent migrators. Removing the scenario lock from `beginUpload` or the expiry check from `claimSigner` makes the matching test fail, so the races have teeth.
 
+## Buyer purchase slice (in progress)
+
+- Spec: [document 22](22-demo-buyer-purchase.md), design-reviewed and approved. Build steps 1-4 are implemented: schema and database guards (migrations `0005`, `0006`), FCAE v0 allocation and half-even commission, the order service (scenario lock, reservations, shortfall offers, reaper), payments (signed webhook with every decision branch, refunds, deterministic simulator), and HTTP routes with a seeded buyer account and a 20 x 10 demo market.
+- Validation: 103 PGlite tests and 15 real-PostgreSQL race tests pass; the races and key guards were mutation-checked (removing the lock, the event-recording order, the same-attempt or mismatch branch, or the active-hold index turns the matching test red). A live smoke against a throwaway database ran the full journey (inventory, 20-credit order, payment, replayed callback with an unchanged ledger, forged webhook rejected); the server log had no errors and no secrets.
+- Remaining: worker sweep, market metrics and the invariant check (step 5), and buyer screens (step 6).
+
 ## Remaining release work
 
 This does not complete week 1 or the public release gate: hosted staging, deployed PostgreSQL checks, phone OTP, production role/device policies, versioned migrations, private object storage, cross-plot spatial checks and operational hardening remain. Offline shell behaviour is implemented and covered by automated worker/storage tests; real-device verification is still pending. Evidence approval does not make a credit or MRV/calculation-verification claim.

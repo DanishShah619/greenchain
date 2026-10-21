@@ -33,7 +33,7 @@ Use Node 22.14+ and Docker Desktop running Linux containers.
 ```powershell
 npm ci
 Copy-Item .env.example .env
-# Edit .env: set distinct DEMO_PRESENTER_PASSWORD and DEMO_VERIFIER_PASSWORD (16+ characters),
+# Edit .env: set distinct DEMO_PRESENTER_PASSWORD, DEMO_VERIFIER_PASSWORD and DEMO_BUYER_PASSWORD (16+ characters),
 # plus an independently generated 32-byte base64url AUDIT_HMAC_KEY shared by API and worker.
 docker compose up -d
 npm run db:setup
@@ -69,12 +69,20 @@ Tuning (all optional): `PROOF_MAX_FAILURES` (8), `PROOF_RETRY_BASE_SECONDS` (30)
 
 The browser API URL defaults to localhost:4000. For hosting, set `NEXT_PUBLIC_API_URL` before the web build. Set `WEB_ORIGIN` to the exact frontend origin and `COOKIE_SECURE=true`; use HTTPS and a same-site frontend/API deployment. If the API sits behind a reverse proxy or CDN, set `TRUST_PROXY` to the number of trusted proxy hops (1–5); otherwise every visitor shares the proxy's address and the login limiter locks everyone out together. Leave it unset when the API is reached directly, so forwarded headers cannot be spoofed. No hosting resources have been provisioned.
 
+### Buyer purchase (demo)
+
+`db:setup` (and `npm run demo:api`) seeds a demo market in the presenter scenario: 20 synthetic farmer groups with 10 demo credits each and a flat demo price, plus a `buyer` account. Sign in with `account: "buyer"`. A buyer sees pseudonymous group labels, counts and provenance ids, never farmer names or villages. The flow: `GET /api/v1/market/inventory`, `POST /api/v1/orders` `{requestId, quantity}` (idempotent per request id; a shortfall returns an offer you can accept with `POST /orders/:id/accept-partial`), `POST /orders/:id/payment-attempts` `{acceptSnapshotHash}` (the order's `snapshotHash`), then payment events arrive on the signed webhook `POST /api/v1/payments/webhooks/simulator`. Reservations last 5 minutes (15 once payment is pending, never more than 30). A buyer may hold at most 3 open orders and 10% of supply (so about 20 credits with the seed).
+
+With `DEMO_MODE=true` the presenter (agent account) drives the simulated provider: `POST /api/v1/demo/orders/:id/simulate` with `outcome` one of `pending`, `success`, `failure`, `replay` (resend the last event byte-for-byte; the ledger does not change), `double_charge`, `late_success` or `refund`. Every outcome goes through the same signed-webhook handler a real provider would use. All money is integer paise; tax is a recorded zero demo rule. Nothing here is real settlement or a recognised credit. Details and failure handling: [docs/22](docs/22-demo-buyer-purchase.md).
+
+The local demo creates `.local/buyer-password.txt` and `.local/payment-webhook-secret.txt` once and always runs with simulated payments on.
+
 ### Integration tests on real PostgreSQL
 
 `npm test -w apps/api` uses in-process PGlite (one connection), which is fast but cannot show races between connections. `npm run test:pg -w apps/api` runs `apps/api/test/pg` against a real server with parallel connections: the evidence-upload quota (34 concurrent 2 MiB reservations admit exactly 32), competing and replayed calculation approvals (one batch), signer-lease claim and expiry fencing, concurrent audit appenders and chainers, and concurrent migrators. Each test file creates and drops its own throwaway database.
 
 ```powershell
-docker compose up -d db                 # if host port 5432 is taken, first: $env:GREENCHAIN_DB_PORT = '5433'
+docker compose up -d db                 # if host port 5432 is taken, first pick a free one, e.g. $env:GREENCHAIN_DB_PORT = '55432'
 $env:TEST_DATABASE_URL = 'postgres://greenchain:local-demo-only@127.0.0.1:5432/postgres'   # use the same port as above
 npm run test:pg -w apps/api
 ```
