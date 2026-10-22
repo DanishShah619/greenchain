@@ -10,6 +10,13 @@ export function quotePaise(unitPricePaise:string,quantity:number):string{
   if(!/^[0-9]+$/.test(unitPricePaise)||!Number.isInteger(quantity)||quantity<0)return '0';
   return String(BigInt(unitPricePaise)*BigInt(quantity));
 }
+/** A whole number of credits from 1 to 100, or null. The input text is kept as typed; it is never coerced to a default. */
+export function parseQuantity(text:string):number|null{
+  const trimmed=text.trim();
+  if(!/^[0-9]{1,3}$/.test(trimmed))return null;
+  const value=Number(trimmed);
+  return value>=1&&value<=100?value:null;
+}
 export const ORDER_STATE_LABELS:Record<string,string>={
   CREATED:'Offer — nothing reserved',RESERVED:'Reserved for you',AWAITING_PAYMENT:'Waiting for payment',FULFILLED:'Purchased',
   CANCELLED:'Cancelled',EXPIRED:'Reservation expired',REVALIDATING:'Checking a late payment',REFUND_PENDING:'Refund in progress',REFUNDED:'Refunded'};

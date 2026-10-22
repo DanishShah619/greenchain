@@ -24,3 +24,8 @@ test('every order state has a buyer-facing label; settling states are the ones t
   assert.equal(stateLabel('SOMETHING_NEW'),'something new');
   assert.deepEqual(['AWAITING_PAYMENT','FULFILLED','REFUND_PENDING','RESERVED'].map(isSettling),[true,false,true,false]);
 });
+test('quantity text is parsed, never coerced: empty or invalid input is "no quantity", not 1 or 0',async()=>{
+  const {parseQuantity}=await import('../src/market');
+  assert.deepEqual(['1','12','100',' 7 '].map(parseQuantity),[1,12,100,7]);
+  for(const bad of ['','0','101','2.5','-3','1e2','abc','12a'])assert.equal(parseQuantity(bad),null,JSON.stringify(bad));
+});

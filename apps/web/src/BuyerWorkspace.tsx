@@ -1,6 +1,6 @@
 'use client';
 import {useEffect,useState,type FormEvent} from 'react';
-import {formatPaise,isSettling,quotePaise,remaining,SHORTFALL_REASONS,stateLabel} from './market';
+import {formatPaise,isSettling,parseQuantity,quotePaise,remaining,SHORTFALL_REASONS,stateLabel} from './market';
 type Request=(path:string,options?:RequestInit)=>Promise<any>;
 type Group={group:string;vintage:number;available:number;reserved:number;sold:number;provenance:{batchId:string;calculationId:string}};
 type Inventory={label:string;asOf:string;unitPricePaise:string|null;available:number;groups:Group[]};
@@ -18,7 +18,9 @@ const shortId=(id:string)=>id.slice(0,8).toUpperCase();
  */
 export function BuyerWorkspace({request,online=true}:{request:Request;online?:boolean}){
   const [inventory,setInventory]=useState<Inventory|null>(null),[orders,setOrders]=useState<OrderSummary[]>([]),[order,setOrder]=useState<Order|null>(null);
-  const [quantity,setQuantity]=useState(5),[requestId,setRequestId]=useState(()=>crypto.randomUUID());
+  // The field keeps exactly what the buyer typed; the number is derived from it during render.
+  const [quantityText,setQuantityText]=useState('5'),[requestId,setRequestId]=useState(()=>crypto.randomUUID());
+  const quantity=parseQuantity(quantityText);
   const [message,setMessage]=useState(''),[busy,setBusy]=useState(false),[now,setNow]=useState(()=>Date.now());
   // Orders and payments are never queued offline (docs/06 §7): every action needs the server, so it is disabled with a reason.
   const blocked=busy||!online;
@@ -36,9 +38,9 @@ export function BuyerWorkspace({request,online=true}:{request:Request;online?:bo
     const poll=isSettling(order.order.state)?setInterval(()=>{refresh(order.order.id).catch(()=>{});},3000):undefined;
     return()=>{if(tick)clearInterval(tick);if(poll)clearInterval(poll);};
   },[order?.order.id,order?.order.state]);
-  const price=inventory?.unitPricePaise??null,quote=price?quotePaise(price,quantity):null;
+  const price=inventory?.unitPricePaise??null,quote=price&&quantity?quotePaise(price,quantity):null;
   async function place(event:FormEvent){
-    event.preventDefault();if(!price)return;setBusy(true);
+    event.preventDefault();if(!price||!quantity)return;setBusy(true);
     try{
       // The same request id is reused if this is retried after a network failure, so a retry can never create a second order.
       const created:Order=await request('/orders',{method:'POST',body:JSON.stringify({requestId,quantity,quotedTotalPaise:quotePaise(price,quantity)})});
@@ -58,11 +60,12 @@ export function BuyerWorkspace({request,online=true}:{request:Request;online?:bo
     <p className="notice demo-banner" role="note"><strong>Demonstration</strong> — synthetic credits and simulated payments. No real money moves and no recognised carbon credits are sold.</p>
     {!online&&<p className="notice" role="alert">You are offline. Ordering and payment need a connection; nothing is queued on this device.</p>}
     <div className="card-heading"><h2>Demo credit marketplace</h2><button className="text-button" disabled={busy} onClick={()=>refresh().catch(error=>fail(error,'Refresh failed.'))}>Refresh</button></div>
+    {!inventory&&!message&&<p role="status">Loading the marketplace…</p>}
     {inventory&&<><dl className="market-summary"><div><dt>Available now</dt><dd>{inventory.available} credits</dd></div><div><dt>Price per credit</dt><dd>{formatPaise(price)}</dd></div><div><dt>Farmer groups</dt><dd>{inventory.groups.length}</dd></div></dl>
       <details><summary>Supply by farmer group (pseudonymous)</summary><ul className="group-list">{inventory.groups.map(g=><li key={g.group}><strong>{g.group}</strong><span>{g.available} available · {g.reserved} reserved · {g.sold} sold · vintage {g.vintage}</span><code>batch {g.provenance.batchId} · calculation {g.provenance.calculationId}</code></li>)}</ul></details></>}
-    <form onSubmit={place} className="order-form"><label>Credits to buy<input type="number" min={1} max={100} step={1} inputMode="numeric" required value={quantity} onChange={event=>{setQuantity(Math.max(1,Math.min(100,Math.trunc(Number(event.target.value))||1)));setRequestId(crypto.randomUUID());}}/></label>
-      <p className="help">Estimated total {formatPaise(quote)}. Credits are spread across farmer groups that have waited longest for a sale; one group supplies at most 15% of an order. A reservation is held for 5 minutes.</p>
-      <button disabled={blocked||!price}>{price?`Reserve ${quantity} credit${quantity===1?'':'s'}`:'No price set yet'}</button></form>
+    <form onSubmit={place} className="order-form"><label>Credits to buy<input type="number" min={1} max={100} step={1} inputMode="numeric" required aria-invalid={quantity===null} aria-describedby="quantity-help" value={quantityText} onChange={event=>{setQuantityText(event.target.value);setRequestId(crypto.randomUUID());}}/></label>
+      <p className="help" id="quantity-help">{quantity===null?'Enter a whole number of credits from 1 to 100. ':`Estimated total ${formatPaise(quote)}. `}Credits are spread across farmer groups that have waited longest for a sale; one group supplies at most 15% of an order. A reservation is held for 5 minutes.</p>
+      <button disabled={blocked||!price||quantity===null}>{!price?'No price set yet':quantity===null?'Enter a quantity':`Reserve ${quantity} credit${quantity===1?'':'s'}`}</button></form>
     {orders.length>0&&<><h3 className="section-title">Your orders</h3><div className="case-list">{orders.map(item=><button type="button" className="case-row" key={item.id} disabled={busy} aria-current={item.id===o?.id?'true':undefined} onClick={()=>open(item.id)}>
       <strong>Order {shortId(item.id)} · {stateLabel(item.state)}</strong><span>{item.allocatedQuantity||item.quantity} credits · {formatPaise(item.payablePaise)} · {new Date(item.createdAt).toLocaleString()}</span></button>)}</div></>}
     {order&&o&&<section className="case-detail" aria-labelledby="order-title">

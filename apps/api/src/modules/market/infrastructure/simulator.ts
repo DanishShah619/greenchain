@@ -5,7 +5,8 @@ import type {Actor} from '../../capture/application/capture.js';
 import {withScenarioLock} from '../application/lock.js';
 import {reapExpired,DEFAULT_MARKET} from '../application/orders.js';
 import {assertMarketInvariants} from '../application/invariants.js';
-import {handlePaymentEvent,settleRefunds,signWebhook,type PaymentConfig,type ProviderEvent,type WebhookResult} from '../application/payments.js';
+import {EVENT_TYPES,handlePaymentEvent,settleRefunds,signWebhook,type PaymentConfig,type ProviderEvent,type WebhookResult} from '../application/payments.js';
+const isEventType=(value:unknown):value is ProviderEvent['type']=>EVENT_TYPES.some(type=>type===value);
 /**
  * Deterministic stand-in for a payment provider (docs/22 B9). It builds and signs events exactly as a provider would and
  * delivers them through the same handler, so every demo outcome exercises the real code path. Never used for real money.
@@ -47,12 +48,14 @@ export async function simulate(db:Database,actor:Actor,orderId:string,outcome:Si
     if(outcome==='replay'){
       const last=(await tx.query(`SELECT e.provider_event_id,e.type,e.amount_paise,a.provider_ref FROM demo_payment_events e JOIN demo_payment_attempts a ON a.id=e.attempt_id WHERE a.order_id=$1 ORDER BY e.received_at DESC LIMIT 1`,[order.id])).rows[0];
       if(!last)throw new WorkflowError('NOTHING_TO_REPLAY');
-      return {replay:{id:last.provider_event_id as string,type:last.type,providerRef:last.provider_ref as string,amountPaise:String(last.amount_paise),currency:'INR'}};
+      // Stored events were verified on arrival, so the type is always known; a mismatch means the table was edited by hand.
+      if(!isEventType(last.type))throw new WorkflowError('PAYMENT_EVENT_UNREADABLE',500);
+      return {kind:'replay' as const,replay:{id:String(last.provider_event_id),type:last.type,providerRef:String(last.provider_ref),amountPaise:String(last.amount_paise),currency:'INR'}};
     }
-    return {attempt:latest};
+    return {kind:'send' as const,attempt:latest};
   });
-  const body='replay' in attempt
-    ?eventBody(attempt.replay as any)
+  const body=attempt.kind==='replay'
+    ?eventBody(attempt.replay)
     :eventBody({id:`evt_${randomUUID().replace(/-/g,'')}`,type:TYPE[outcome as keyof typeof TYPE],providerRef:attempt.attempt.provider_ref,amountPaise:String(attempt.attempt.amount_paise),currency:'INR'});
   return handlePaymentEvent(db,signedDelivery(config,body),config);
 }
