@@ -4,6 +4,7 @@ import {WorkflowError} from '../../../kernel/errors.js';
 import type {Actor} from '../../capture/application/capture.js';
 import {withScenarioLock} from '../application/lock.js';
 import {reapExpired,DEFAULT_MARKET} from '../application/orders.js';
+import {assertMarketInvariants} from '../application/invariants.js';
 import {handlePaymentEvent,settleRefunds,signWebhook,type PaymentConfig,type ProviderEvent,type WebhookResult} from '../application/payments.js';
 /**
  * Deterministic stand-in for a payment provider (docs/22 B9). It builds and signs events exactly as a provider would and
@@ -68,4 +69,14 @@ export async function presenterOrders(db:Database,actor:Actor){
   return {namespace:'DEMO_ONLY' as const,outcomes:SIMULATED_OUTCOMES,orders:rows.map(r=>({id:r.id as string,state:r.state as string,quantity:r.quantity as number,allocatedQuantity:r.allocated_quantity as number,
     payablePaise:String(r.payable_paise),payment:(r.payment??null) as string|null,refundsPending:r.refunds_pending as number,
     reservedUntil:r.reserved_until?new Date(r.reserved_until).toISOString():null,createdAt:new Date(r.created_at).toISOString()}))};
+}
+/**
+ * The market invariant report (docs/22 §8) for the presenter and the market smoke script. The check spans every scenario, so
+ * only violation codes and counts are returned, never another scenario's order or credit ids. Demo mode only.
+ */
+export async function presenterInvariantReport(db:Database,actor:Actor){
+  if(actor.role!=='agent')throw new WorkflowError('FORBIDDEN',403);
+  const counts=new Map<string,number>();
+  for(const v of await assertMarketInvariants(db))counts.set(v.code,(counts.get(v.code)??0)+1);
+  return {namespace:'DEMO_ONLY' as const,checkedAt:new Date().toISOString(),violations:[...counts].map(([code,count])=>({code,count}))};
 }

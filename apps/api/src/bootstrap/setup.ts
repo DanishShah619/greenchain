@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {connectDatabase} from './database.js';
 import {migrate} from '../kernel/migrate.js';
 import {hashPassword} from '../kernel/password.js';
-import {seedDemoMarket} from '../modules/market/application/seed.js';
+import {SHOWCASE_MARKET,seedDemoMarket} from '../modules/market/application/seed.js';
 const password=process.env.DEMO_PRESENTER_PASSWORD;
 const verifierPassword=process.env.DEMO_VERIFIER_PASSWORD;
 if(!password || password.length<16) throw new Error('Set DEMO_PRESENTER_PASSWORD to at least 16 characters');
@@ -16,7 +16,7 @@ try {
   console.log(`Migrations ${migrated.applied.length?`applied: ${migrated.applied.join(', ')}`:'already current'}${migrated.baselined?' (existing database recorded as baseline 0001)':''}; schema version ${migrated.current}.`);
   await database.db.transaction(async tx=>{
     await tx.query("INSERT INTO scenarios(id) VALUES ('showcase'),('presenter') ON CONFLICT DO NOTHING");
-    await tx.query("INSERT INTO demo_namespaces(scenario_id) VALUES ('presenter') ON CONFLICT DO NOTHING");
+    await tx.query("INSERT INTO demo_namespaces(scenario_id) VALUES ('presenter'),('showcase') ON CONFLICT DO NOTHING");
     await tx.query("INSERT INTO users(id,scenario_id,role,password_hash) VALUES ('presenter','presenter','agent',$1) ON CONFLICT DO NOTHING",[hashPassword(password)]);
     await tx.query("INSERT INTO users(id,scenario_id,role,password_hash) VALUES ('verifier','presenter','verifier',$1) ON CONFLICT DO NOTHING",[hashPassword(verifierPassword)]);
     await tx.query("INSERT INTO review_mandates(user_id,scenario_id,institution_id) VALUES ('verifier','presenter','demo-institution') ON CONFLICT DO NOTHING");
@@ -27,5 +27,6 @@ try {
   });
   const seeded=await seedDemoMarket(database.db,{scenarioId:'presenter'});
   console.log(`Demo market: ${seeded.groupsCreated?`seeded ${seeded.groupsCreated} synthetic farmer groups`:'already seeded'}.`);
+  await seedDemoMarket(database.db,SHOWCASE_MARKET);
   console.log('Schema and synthetic showcase ready. Existing presenter, verifier and buyer passwords preserved.');
 } finally {await database.close();}

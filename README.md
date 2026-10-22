@@ -131,3 +131,7 @@ With the local services running and an evidence-approved case present, run `node
 ## Issuance smoke
 
 Run `node scripts/demo-issuance-smoke.mjs` with local services available. It creates one fresh synthetic case, uploads sample proofs, approves evidence, calculates and independently approves the exact result, then checks two unique demo credits, buffer/carry conservation and duplicate protection. It reads local passwords without printing them. The local worker chains the audit and queues its proof. Run `node scripts/demo-audit-smoke.mjs` to check the saved chain and proof intent. Without Amoy configuration, no blockchain request is sent.
+
+## Market smoke
+
+With `npm run demo:local` running, run `node scripts/demo-market-smoke.mjs`. As the buyer it browses the demo market, orders two credits and checks the allocation explanation, then starts payment. As the presenter it simulates the provider's success, then replays the same callback and checks that the ledger is unchanged. Finally it prints the market invariant report, which must show no violations. It reads the local buyer and presenter passwords without printing them, and leaves one fulfilled demo order behind.

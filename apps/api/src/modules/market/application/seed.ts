@@ -8,6 +8,10 @@ import {hashPassword} from '../../../kernel/password.js';
  * again changes nothing (including credits that have since been reserved or sold).
  */
 export const DEMO_PRICE_PAISE=100030n;
+/** Actor id on the seed's synthetic cases, so listings of real captures can leave them out. */
+export const MARKET_SEED_ACTOR='market-seed';
+/** The public showcase's read-only sample market: smaller than the presenter's, and never ordered from. */
+export const SHOWCASE_MARKET={scenarioId:'showcase',groups:6,perGroup:5};
 const uuidFrom=(name:string)=>{
   const h=createHash('sha256').update(`greenchain-demo-market:${name}`).digest('hex');
   return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-8${h.slice(17,20)}-${h.slice(20,32)}`;
@@ -22,7 +26,7 @@ export async function seedDemoMarket(db:Database,o:{scenarioId:string;groups?:nu
     for(let g=0;g<groups;g++){
       const key=`${scenario}:${g}`,capture=uuidFrom(`${key}:capture`),decision=uuidFrom(`${key}:decision`),run=uuidFrom(`${key}:run`),review=uuidFrom(`${key}:review`),batch=uuidFrom(`${key}:batch`);
       const since=new Date(now.getTime()-(g+1)*86_400_000),label=`Market seed farmer ${String(g+1).padStart(2,'0')}`;
-      const inserted=(await tx.query(`INSERT INTO captures(scenario_id,event_id,actor_id,fingerprint,farmer_label,village,area_hectares) VALUES ($1,$2,'market-seed','seed',$3,'Synthetic village',1.00) ON CONFLICT DO NOTHING RETURNING event_id`,[scenario,capture,label])).rows.length;
+      const inserted=(await tx.query(`INSERT INTO captures(scenario_id,event_id,actor_id,fingerprint,farmer_label,village,area_hectares) VALUES ($1,$2,$4,'seed',$3,'Synthetic village',1.00) ON CONFLICT DO NOTHING RETURNING event_id`,[scenario,capture,label,MARKET_SEED_ACTOR])).rows.length;
       if(!inserted)continue;
       created++;
       await tx.query(`INSERT INTO review_decisions(id,scenario_id,capture_id,reviewer_id,decision,reason,fingerprint,snapshot) VALUES ($1,$2,$3,$4,'EVIDENCE_APPROVED','Synthetic seed evidence','seed','{}'::jsonb)`,[decision,scenario,capture,reviewer]);

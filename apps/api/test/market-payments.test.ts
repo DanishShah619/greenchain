@@ -57,6 +57,15 @@ test('a second success event for the same attempt is the same charge: ignored, n
   assert.equal((await deliver(db,providerRef,'payment.succeeded')).outcome,'IGNORED_SAME_ATTEMPT');
   assert.equal(await count(db,'SELECT count(*)::int AS n FROM demo_payment_refunds'),0);await clean(db);
 });
+test('a correct-amount success after a wrong-amount one on the same attempt is a real payment: it fulfils, then repeats are ignored',async()=>{
+  const {db,order,providerRef}=await setup();
+  assert.equal((await deliver(db,providerRef,'payment.succeeded',{amount:PRICE})).outcome,'AMOUNT_MISMATCH');
+  assert.equal((await deliver(db,providerRef,'payment.succeeded')).outcome,'FULFILLED','the correct payment is not mistaken for the refunded one');
+  const v=await getOrder(db,b1,order.order.id);
+  assert.equal(v.order.state,'FULFILLED');assert.deepEqual(v.refunds,[{kind:'AMOUNT_MISMATCH',state:'PENDING',amountPaise:String(PRICE)}]);
+  assert.equal((await deliver(db,providerRef,'payment.succeeded')).outcome,'IGNORED_SAME_ATTEMPT','the correct charge reported again');
+  await clean(db);
+});
 test('a second attempt that also captures money is refunded and the order is untouched',async()=>{
   const {db,order,providerRef}=await setup();
   await deliver(db,providerRef,'payment.succeeded');

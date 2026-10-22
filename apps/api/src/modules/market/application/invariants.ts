@@ -5,7 +5,7 @@ import type {Database} from '../../../kernel/database.js';
  * states outright; this check is what notices if a guard is ever removed or bypassed.
  */
 export type Violation={code:string;ref:string};
-export const INVARIANT_CODES=['SOLD_WITHOUT_FULFILMENT','RESERVED_WITHOUT_HOLD','HOLD_WITHOUT_CREDIT','HOLD_COUNT_MISMATCH','RELEASED_ORDER_HOLDS','RESERVATION_LAPSED','FULFILLED_TOTALS','FULFILLED_PAYMENT','REFUND_WITH_SALE','GROUP_STATE_WITHOUT_SALE'] as const;
+export const INVARIANT_CODES=['SOLD_WITHOUT_FULFILMENT','RESERVED_WITHOUT_HOLD','HOLD_WITHOUT_CREDIT','HOLD_COUNT_MISMATCH','RELEASED_ORDER_HOLDS','RESERVATION_LAPSED','FULFILLED_TOTALS','FULFILLED_PAYMENT','REFUND_WITH_SALE','CAPTURE_NOT_ACCOUNTED','GROUP_STATE_WITHOUT_SALE'] as const;
 export async function assertMarketInvariants(db:Database,options:{lapseGraceSeconds?:number}={}):Promise<Violation[]>{
   const grace=options.lapseGraceSeconds??120;
   const checks:[string,string,unknown[]][]=[
@@ -29,8 +29,14 @@ export async function assertMarketInvariants(db:Database,options:{lapseGraceSeco
        OR o.principal_paise<>o.unit_price_paise*o.allocated_quantity)`,[]],
     ['FULFILLED_PAYMENT',`SELECT o.id::text AS ref FROM demo_orders o WHERE o.state='FULFILLED' AND (SELECT count(*) FROM demo_payment_events e JOIN demo_payment_attempts a ON a.id=e.attempt_id
        WHERE a.order_id=o.id AND e.outcome IN ('FULFILLED','REVALIDATED_FULFILLED') AND e.amount_paise=o.payable_paise)<>1`,[]],
-    // 5. A refunded order sold nothing.
+    // 5. A refunded order sold nothing, and its refunds sum to the captured amount.
     ['REFUND_WITH_SALE',`SELECT o.id::text AS ref FROM demo_orders o WHERE o.state IN ('REFUND_PENDING','REFUNDED') AND EXISTS (SELECT 1 FROM demo_credits c WHERE c.reserved_order_id=o.id AND c.state='SOLD')`,[]],
+    // Checked for every order, not only refunded ones: each applied success captured money, and that money is either the
+    // fulfilled order's payable amount or owed back as a refund. A re-reported charge (IGNORED_SAME_ATTEMPT) captured nothing new.
+    ['CAPTURE_NOT_ACCOUNTED',`SELECT o.id::text AS ref FROM demo_orders o WHERE
+       (SELECT coalesce(sum(e.amount_paise),0) FROM demo_payment_events e JOIN demo_payment_attempts a ON a.id=e.attempt_id
+         WHERE a.order_id=o.id AND e.type='payment.succeeded' AND e.outcome<>'IGNORED_SAME_ATTEMPT')
+       <>(SELECT coalesce(sum(r.amount_paise),0) FROM demo_payment_refunds r WHERE r.order_id=o.id)+CASE WHEN o.state='FULFILLED' THEN o.payable_paise ELSE 0 END`,[]],
     // 6. A group's last allocation is only ever set by a fulfilment.
     ['GROUP_STATE_WITHOUT_SALE',`SELECT g.group_id::text AS ref FROM demo_group_state g WHERE NOT EXISTS (SELECT 1 FROM demo_ledger_entries l JOIN demo_orders o ON o.id=l.order_id
        WHERE l.payee_group_id=g.group_id AND o.state='FULFILLED' AND o.scenario_id=g.scenario_id)`,[]],

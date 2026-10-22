@@ -1,6 +1,6 @@
 # Demo buyer purchase slice: marketplace, reservation, simulated payment, fulfilment
 
-Status: **Revision 2, approved 2026-10-19. Build steps 1-2 are implemented: schema and guards (`0005`, `0006`), FCAE v0 and money (`modules/market/domain`), the order service (`modules/market/application`: scenario lock, create, accept-partial, cancel, reaper, invariants) payments (`payments.ts`: start attempt, signed webhook handler with every §6.1 branch, refund settlement; `infrastructure/simulator.ts`), the HTTP routes, buyer account and demo seed (`market/http/routes.ts`, `application/seed.ts`, `inventory.ts`), the worker sweep with market metrics and the scheduled invariant check (`application/sweep.ts`, `metrics.ts`), each with PGlite tests and real-Postgres races, and the web screens (`apps/web/src/BuyerWorkspace.tsx`, `PresenterMarketPanel.tsx`, `market.ts`). All six build steps are implemented. Manual checks on real phones remain deferred.** Revision 2 folds in an independent design review (`backend-design:component-architect`) that found defects in revision 1; §14 lists them. Scope: the demo subset of [06 §4.2 and §6](06-technical-design.md), [09](09-pricing-invoicing-design.md) and [14](14-company-buyer-flow.md), under the delivery limits of [13](13-public-demo-plan.md). Where this slice is simpler than the production design, §10 lists the deviation and the trigger that removes it. Rigor tier: money-adjacent but synthetic (simulated payments, no real users); the production invariants for double-sale and duplicate callbacks still apply in full, because they are the point of the demonstration.
+Status: **Revision 2, approved 2026-10-19. Build steps 1-2 are implemented: schema and guards (`0005`, `0006`), FCAE v0 and money (`modules/market/domain`), the order service (`modules/market/application`: scenario lock, create, accept-partial, cancel, reaper, invariants) payments (`payments.ts`: start attempt, signed webhook handler with every §6.1 branch, refund settlement; `infrastructure/simulator.ts`), the HTTP routes, buyer account and demo seed (`market/http/routes.ts`, `application/seed.ts`, `inventory.ts`), the worker sweep with market metrics and the scheduled invariant check (`application/sweep.ts`, `metrics.ts`), each with PGlite tests and real-Postgres races, and the web screens (`apps/web/src/BuyerWorkspace.tsx`, `PresenterMarketPanel.tsx`, `market.ts`). All six build steps are implemented. Manual checks on real phones remain deferred. A spec-conformance review on 2026-10-22 found gaps; §15 lists the fixes, including decision B13 and the market smoke script.** Revision 2 folds in an independent design review (`backend-design:component-architect`) that found defects in revision 1; §14 lists them. Scope: the demo subset of [06 §4.2 and §6](06-technical-design.md), [09](09-pricing-invoicing-design.md) and [14](14-company-buyer-flow.md), under the delivery limits of [13](13-public-demo-plan.md). Where this slice is simpler than the production design, §10 lists the deviation and the trigger that removes it. Rigor tier: money-adjacent but synthetic (simulated payments, no real users); the production invariants for double-sale and duplicate callbacks still apply in full, because they are the point of the demonstration.
 
 ## 1. Goal and non-goals
 
@@ -26,6 +26,7 @@ Confirmed by the user on 2026-10-19: **B10, B11, B12**. The others are proposals
 | B10 | **Late success after a buyer cancel fulfils the order** (via REVALIDATING, all-or-nothing on the same credits), because the payment is real. If the credits are gone, refund. | User decision. |
 | B11 | **The per-buyer limit stays**: at most 3 open orders and at most 10% of *eligible supply* (AVAILABLE + RESERVED credits at order time), and at least 1, reserved at once (the "at least 1" floor matches the cap and quota rules, so a tiny pilot market is not locked out). Over the limit is a distinct `422 BUYER_LIMIT`, not a shortfall reason. With the 200-credit seed the effective maximum order is about 20; the seed and docs say so. | User decision. |
 | B12 | **Audit anchor:** market audit events attach to a case. Order and payment events use the capture of the batch of the order's first credit (lowest credit id) as `capture_id`; the entity is named in the payload (`order:<id>`). System actors (webhook, reaper) use actor id `system:market` with scenario from the order. No schema change to `audit_events`. | User decision. |
+| B13 | **Same charge means a correct-amount success already applied.** A success on an attempt that is already `SUCCEEDED` is `IGNORED_SAME_ATTEMPT` only if a correct-amount success of that attempt was applied before (outcome `FULFILLED`, `REVALIDATED_FULFILLED`, `REFUND_LATE_UNFILLABLE` or `REFUND_DUPLICATE_ATTEMPT`). If the attempt only had an `AMOUNT_MISMATCH` success, which was refunded on its own, a later correct-amount success is a real payment and goes on to the fulfil, duplicate or late-success branches. | Proposal (2026-10-22), override at sign-off. Without it, that payment was ignored and never refunded. When unsure, the buyer is made whole, as with the mismatch-first rule. |
 
 ## 3. Roles and visibility
 
@@ -34,7 +35,7 @@ Confirmed by the user on 2026-10-19: **B10, B11, B12**. The others are proposals
 | Buyer | list inventory summary; create order; accept a partial fill; start/cancel a payment attempt or order; read **own** orders and ledger lines | see farmer label, village, plot, evidence, other buyers' orders, other scenarios; call agent/verifier routes |
 | Agent / Verifier | unchanged | any buyer route (403) |
 | Presenter (agent account) | trigger simulator outcomes for orders in its own scenario | affect orders of another scenario |
-| Showcase (public) | read-only sample inventory counts | any write |
+| Showcase (public) | read-only sample inventory counts: totals of the showcase scenario's own seeded market (6 groups × 5 credits), in `GET /showcase` | any write; see groups, ids or provenance; see another scenario's market |
 
 The marketplace shows **pseudonymous group labels** (`Group 07`), counts, vintage, price and provenance (batch and calculation IDs); never names, villages or areas. Order ownership is `orders.buyer_id` from the session. Other buyers' or scenarios' ids return **404**, never 403.
 
@@ -86,7 +87,7 @@ All routes under `/api/v1`, session + CSRF on writes (except the webhook), scena
 
 | Route | Behaviour |
 |---|---|
-| `GET /market/inventory` | AVAILABLE counts, price in force, per-group labels and availability. |
+| `GET /market/inventory` | AVAILABLE counts, price in force, per-group labels and availability. Each group also shows its reserved and sold counts, so the buyer can see supply moving; these are counts under a pseudonymous label, not farmer data. |
 | `POST /orders` `{requestId, quantity, quotedTotalPaise?}` | §6.3. Replays return the stored order; reuse of `requestId` with a different `quantity` or quote is `KEY_REUSE`. |
 | `POST /orders/:id/accept-partial` | §6.3. |
 | `POST /orders/:id/payment-attempts` `{acceptSnapshotHash}` | Locked; reaps first, then checks ownership and state. `acceptSnapshotHash` is **always required** and must equal the order's `snapshotHash` (price, quantity, amount, commission, tax rule), so a buyer can only pay for the exact terms they were shown. One open attempt at a time; asking again returns it. A `payment.pending` event extends the reservation. |
@@ -94,6 +95,7 @@ All routes under `/api/v1`, session + CSRF on writes (except the webhook), scena
 | `GET /orders`, `GET /orders/:id` | Own orders only, **rebuilt from stored rows** (order, items, allocation log, attempts, refunds, purchased credits with their price), never recomputed. The commission/net split is not shown to buyers. |
 | `POST /payments/webhooks/simulator` | §6.1. No cookie, no CSRF; signature only. Absent `PAYMENT_WEBHOOK_SECRET` → 404. |
 | `GET /demo/orders` | Presenter only, `DEMO_MODE` only: the scenario's 20 most recent orders (state, amounts, latest payment state, pending refunds), so the presenter can drive the simulator from a second window while the buyer shops in the first. No farmer data. |
+| `GET /demo/invariants` | Presenter only, `DEMO_MODE` only: the §8 invariant report as violation codes and counts. The check spans every scenario, so no ids are returned. Used by the market smoke script. |
 | `POST /demo/orders/:id/simulate` `{outcome}` | Presenter only, `DEMO_MODE` only. Outcomes: `pending`, `success`, `failure`, `replay` (the last event, rebuilt byte-for-byte), `double_charge` (a second attempt succeeds), `late_success`, `refund` (settle pending refunds). **It must run its prelude** (for `late_success`: advance `reserved_until` and run `reapExpired`) **in its own short transaction that commits, and then call `handlePaymentEvent` with no transaction open**, so it never holds the scenario lock while the handler takes it. |
 
 ### 6.1 Webhook and success handler
@@ -110,7 +112,7 @@ handlePaymentEvent(db, {body: Buffer, signature, timestamp}, opts?) → {status:
 2. Lock the order, then the attempt, then the order's credits ascending (the highest-generation items and any credit with `reserved_order_id` = this order).
 3. Decide, first match wins:
    - success, **amount or currency differs** from `attempt.amount_paise`, or the attempt differs from `order.payable_paise`: attempt → `SUCCEEDED` with `mismatch=true`; insert refund `AMOUNT_MISMATCH` for the **event** amount; order untouched. Outcome `AMOUNT_MISMATCH`. (Checked first so no branch strands captured money.)
-   - success, attempt already `SUCCEEDED`: `IGNORED_SAME_ATTEMPT`. **No refund** (it is the same charge).
+   - success, attempt already `SUCCEEDED` by a correct-amount success (B13): `IGNORED_SAME_ATTEMPT`. **No refund** (it is the same charge). An attempt whose only success was a mismatch goes on to the branches below.
    - failure/cancel: apply only if the attempt is `CREATED`/`PENDING`, else `IGNORED_TERMINAL`. A failure never regresses a `SUCCEEDED` attempt.
    - success on a **different attempt**, order already `FULFILLED`/`REFUND_PENDING`/`REFUNDED`: attempt → `SUCCEEDED`, refund `DUPLICATE_ATTEMPT` for the event amount, order unchanged.
    - success, order `RESERVED`/`AWAITING_PAYMENT`, every credit `RESERVED` for this order with an active item (**even if `reserved_until` has passed and the reaper has not run**): fulfil.
@@ -122,7 +124,7 @@ handlePaymentEvent(db, {body: Buffer, signature, timestamp}, opts?) → {status:
 
 ### 6.2 Reservation reaping
 
-`reapExpired(tx, scenarioId, asOf)` is callable **only inside `withScenarioLock`**. It runs at the start of every allocation and from the worker sweep (`marketSweep`), which takes the lock only when an unlocked pre-check finds due work. The sweep also settles refunds once they are `MARKET_REFUND_SETTLE_SECONDS` old (default 600, so `REFUND_PENDING` stays visible; `off` leaves settlement to the presenter) and runs `assertMarketInvariants` every `MARKET_INVARIANT_EVERY_SECONDS`. A failing sweep is counted and logged but does not stop chaining or proofs. Orders in ascending id, credits ascending: orders past `reserved_until` → `EXPIRED`, items `active=false`, credits `RESERVED → AVAILABLE` with `reserved_order_id` cleared; `CREATED` orders older than 15 minutes → `CANCELLED`. **It makes no provider call.** (Revision 1 had the reaper ask the simulator under the lock, which is an RPC inside a lock; the late-success path already handles the race that call guarded against.) The worker cycle gains a market sweep with metrics.
+`reapExpired(tx, scenarioId, asOf)` is callable **only inside `withScenarioLock`**. It runs at the start of every allocation and from the worker sweep (`marketSweep`), which takes the lock only when an unlocked pre-check finds due work. The sweep also settles refunds once they are `MARKET_REFUND_SETTLE_SECONDS` old (default 600, so `REFUND_PENDING` stays visible; `off` leaves settlement to the presenter) and runs `assertMarketInvariants` every `MARKET_INVARIANT_EVERY_SECONDS`, allowing a reservation `MARKET_LAPSE_GRACE_SECONDS` (default 120) past `reserved_until` before invariant 3 reports it. A failing sweep is counted and logged but does not stop chaining or proofs. Orders in ascending id, credits ascending: orders past `reserved_until` → `EXPIRED`, items `active=false`, credits `RESERVED → AVAILABLE` with `reserved_order_id` cleared; `CREATED` orders older than 15 minutes → `CANCELLED`. **It makes no provider call.** (Revision 1 had the reaper ask the simulator under the lock, which is an RPC inside a lock; the late-success path already handles the race that call guarded against.) The worker cycle gains a market sweep with metrics.
 
 ### 6.3 `POST /orders` and FCAE v0
 
@@ -173,9 +175,9 @@ FCAE v0 inputs, under the lock: per group `a_g`, `r_g`, `waiting_days_g = ⌊(as
 
 1. A credit is `SOLD` ⇔ it has exactly one ledger row, `reserved_order_id` is a `FULFILLED` order, and that order's active item for the credit exists.
 2. A credit is `RESERVED` ⇔ it has exactly one active item and its order is `RESERVED`, `AWAITING_PAYMENT` or `REVALIDATING`.
-3. No reservation outlives `reserved_until` by more than one sweep interval, except through an unreaped order whose success is still applicable.
+3. No reservation outlives `reserved_until` by more than one sweep interval (configured as `MARKET_LAPSE_GRACE_SECONDS`), except through an unreaped order whose success is still applicable.
 4. For every `FULFILLED` order: `Σ gross = principal_paise = unit_price_paise × allocated_quantity`, `Σ commission + Σ net = Σ gross`, and exactly one payment event with outcome `FULFILLED`/`REVALIDATED_FULFILLED` whose amount equals `payable_paise`.
-5. Every `REFUND_PENDING`/`REFUNDED` order has zero `SOLD` credits and refunds that sum to the captured amount.
+5. Every `REFUND_PENDING`/`REFUNDED` order has zero `SOLD` credits and refunds that sum to the captured amount. The amount check (`CAPTURE_NOT_ACCOUNTED`) runs for every order: the amounts of its applied success events, except `IGNORED_SAME_ATTEMPT`, equal its refunds plus `payable_paise` if it is `FULFILLED`.
 6. `demo_group_state.last_allocated_at` is changed only for groups with a `FULFILLED` order.
 7. The audit chain stays verified (`verifyAuditFull`) after any sequence of the above.
 
@@ -233,3 +235,20 @@ PGlite is single-connection: it proves logic and constraints, **not locking**. E
 ## 14. What revision 2 changed (from the independent design review)
 
 Critical: the payment-event row was written before the apply transaction, so a rollback lost a captured payment (now written last, in the same transaction); a second success on the *same* attempt would have refunded a legitimate fulfilment (now `IGNORED_SAME_ATTEMPT`, refund only for a different attempt). High: amount mismatch was checked on one branch only; simulate could deadlock by calling the handler under the lock; the reaper made a provider call inside the lock; `cancel`/`accept-partial`/refund paths had no defined lock order; `active` item semantics and re-reservation against the partial unique index were undefined; partial fills broke the principal CHECK and shrank the cap; `EXPIRED`/`CANCELLED` could not reach `REVALIDATING`. Medium: webhook signature did not cover the timestamp or raw body, no rotation, no body cap; `demo_credits.available_since` did not exist; `audit_events` requires a case (decision B12); `demo_buyer_limits` was redundant; `now()` is stale after a lock wait; commission rounding must be done in BigInt.
+
+## 15. Spec-conformance fixes (2026-10-22)
+
+A review of the implementation against this document found these gaps. All are fixed, with tests:
+
+- §6.3: a 23505 on the order-item index was rethrown as a 500. `createOrder` and `acceptPartial` now retry once in a fresh transaction that re-reads supply. A second conflict is a retryable `503 ALLOCATION_CONFLICT`. A request-key conflict is still answered as a replay.
+- §8.5: only the "zero `SOLD` credits" half was checked. `CAPTURE_NOT_ACCOUNTED` now checks the amounts, for every order.
+- §9: only the inventory carried the demonstration label. Order detail, order list, cancel and payment-attempt responses now carry it too.
+- §5: the allocation log lacked weights and quotas. Each group now records `weight` (1 in v0) and `quota`.
+- §3: the public showcase had no market counts. `GET /showcase` now returns totals for a small seeded showcase market. The seed's placeholder cases are left out of the showcase capture list.
+- §7/§11: the cancel × reaper × create race now includes success webhooks and cancels that collide with them. A new pg test documents that `simulate` waits while the scenario lock is held.
+- §11: `scripts/demo-market-smoke.mjs` now exists, backed by `GET /demo/invariants`.
+- §6.1: a correct-amount success after a mismatched one on the same attempt was ignored and never refunded (B13).
+
+Three behaviours outside the original text are kept and now specified: CORS allows `PUT` and `DELETE`, which sign-out and uploads need (a pre-existing bug found in the step 6 browser check); per-group reserved and sold counts in the inventory (§6); and `MARKET_LAPSE_GRACE_SECONDS` (§6.2, §8.3).
+
+Known remaining gap: refunds are unique per `(attempt_id, kind)`. If one attempt reports two *different* wrong amounts, the second refund is not recorded. `CAPTURE_NOT_ACCOUNTED` reports it, but fixing it needs per-event refund identity (a migration).

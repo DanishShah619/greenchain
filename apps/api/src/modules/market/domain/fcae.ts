@@ -17,6 +17,8 @@ export type FcaeOptions={
   /** Allocate exactly this many credits instead of the full quantity (accepting a partial fill). */
   take?:number;
 };
+/** v0 gives every FRPS tier the same weight (docs/22 B4). Recorded in the allocation log so a later, weighted version is comparable. */
+export const TIER_WEIGHT_V0=1;
 /** Per-group cap per order: 15% of the order, at least 1. */
 export const capFor=(q:number)=>Math.max(1,Math.floor(0.15*q));
 /** Reservation quota of a group: at most half of its (available + reserved) stock may be reserved at once, at least 1. */

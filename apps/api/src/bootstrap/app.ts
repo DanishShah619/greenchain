@@ -18,6 +18,8 @@ import {registerAuditRoutes} from '../modules/audit/http/routes.js';
 import {registerMarketRoutes,WEBHOOK_PATH,type MarketRoutesConfig} from '../modules/market/http/routes.js';
 import {DEFAULT_MARKET} from '../modules/market/application/orders.js';
 import {DEFAULT_PAYMENTS} from '../modules/market/application/payments.js';
+import {showcaseMarket} from '../modules/market/application/inventory.js';
+import {MARKET_SEED_ACTOR,SHOWCASE_MARKET} from '../modules/market/application/seed.js';
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 export async function buildApp(db: Database, config: {origin:string; secure:boolean; trustProxy?:number; market?:MarketRoutesConfig}) {
   // Without market configuration there is no webhook secret, so the webhook and the simulator are not registered.
@@ -85,7 +87,10 @@ export async function buildApp(db: Database, config: {origin:string; secure:bool
     await db.query('DELETE FROM sessions WHERE token_hash=$1',[hash(request.cookies.session!)]);
     reply.clearCookie('session',{path:'/'}).code(204).send();
   });
-  app.get('/api/v1/showcase',async () => ({demo:true,captures:(await db.query(`SELECT farmer_label,village,area_hectares,status FROM captures WHERE scenario_id='showcase' ORDER BY created_at,event_id LIMIT 50`)).rows}));
+  // The showcase's market seed needs a case per farmer group; those cases are plumbing for the sample counts, not showcase captures.
+  app.get('/api/v1/showcase',async () => ({demo:true,
+    captures:(await db.query(`SELECT farmer_label,village,area_hectares,status FROM captures WHERE scenario_id='showcase' AND actor_id<>$1 ORDER BY created_at,event_id LIMIT 50`,[MARKET_SEED_ACTOR])).rows,
+    market:await showcaseMarket(db,SHOWCASE_MARKET.scenarioId)}));
   app.get('/api/v1/captures',async (request,reply) => {
     const user=await session(request.cookies.session);
     if(!user) return reply.code(401).send({code:'LOGIN_REQUIRED',retryable:false});

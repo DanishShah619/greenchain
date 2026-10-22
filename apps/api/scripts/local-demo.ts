@@ -9,7 +9,7 @@ import {hashPassword} from '../src/kernel/password.js';
 import type {Database} from '../src/kernel/database.js';
 import {runChainCycle} from '../src/modules/chain/application/worker.js';
 import {amoyFromEnvironment} from '../src/modules/chain/infrastructure/evm.js';
-import {seedDemoMarket} from '../src/modules/market/application/seed.js';
+import {SHOWCASE_MARKET,seedDemoMarket} from '../src/modules/market/application/seed.js';
 import {DEFAULT_MARKET} from '../src/modules/market/application/orders.js';
 import {DEFAULT_PAYMENTS} from '../src/modules/market/application/payments.js';
 import {DEFAULT_SWEEP,marketSweep,newSweepState} from '../src/modules/market/application/sweep.js';
@@ -51,7 +51,7 @@ const db=wrap(pg);
 await migrate(db);
 await db.transaction(async tx=>{
   await tx.query("INSERT INTO scenarios(id) VALUES ('showcase'),('presenter') ON CONFLICT DO NOTHING");
-  await tx.query("INSERT INTO demo_namespaces(scenario_id) VALUES ('presenter') ON CONFLICT DO NOTHING");
+  await tx.query("INSERT INTO demo_namespaces(scenario_id) VALUES ('presenter'),('showcase') ON CONFLICT DO NOTHING");
   await tx.query("INSERT INTO users(id,scenario_id,role,password_hash) VALUES ('presenter','presenter','agent',$1) ON CONFLICT DO NOTHING",[hashPassword(password)]);
   await tx.query("INSERT INTO users(id,scenario_id,role,password_hash) VALUES ('verifier','presenter','verifier',$1) ON CONFLICT DO NOTHING",[hashPassword(verifierPassword)]);
   await tx.query("INSERT INTO review_mandates(user_id,scenario_id,institution_id) VALUES ('verifier','presenter','demo-institution') ON CONFLICT DO NOTHING");
@@ -61,6 +61,7 @@ await db.transaction(async tx=>{
     VALUES ('showcase',$1,'seed','fixture',$2,$3,$4) ON CONFLICT DO NOTHING`,[`00000000-0000-4000-8000-00000000000${i+1}`,...fixtures[i]]);
 });
 await seedDemoMarket(db,{scenarioId:'presenter'});
+await seedDemoMarket(db,SHOWCASE_MARKET);
 // The local demo always runs the simulated provider with presenter controls (DEMO_MODE). Hosting configures these explicitly.
 const app=await buildApp(db,{origin:'http://localhost:3000',secure:false,market:{market:DEFAULT_MARKET,payments:{...DEFAULT_PAYMENTS,secrets:[webhook.value.padEnd(32,'.')]},demoMode:true}});
 const chain=await amoyFromEnvironment();

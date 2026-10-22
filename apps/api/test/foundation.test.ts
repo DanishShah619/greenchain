@@ -47,7 +47,8 @@ test('HTTP capture commits once, rejects changed replay and retains one audit/jo
     const replay=await send();assert.equal(replay.statusCode,200);assert.equal(replay.json().replayed,true);
     const changed=await send({...payload,village:'Different'});assert.equal(changed.statusCode,409);assert.equal(changed.json().code,'KEY_REUSE');
     for(const table of ['captures','audit_events','jobs']) assert.equal((await f.db.query(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n,1);
-    assert.equal((await f.app.inject({url:'/api/v1/showcase'})).json().captures.length,0);
+    const showcase=(await f.app.inject({url:'/api/v1/showcase'})).json();
+    assert.equal(showcase.captures.length,0);assert.deepEqual([showcase.market.available,showcase.market.groups],[0,0],'no sample market until setup seeds it');
     assert.equal((await f.app.inject({url:'/api/v1/captures',headers})).json().captures.length,1);
   }finally{await f.close();}
 });

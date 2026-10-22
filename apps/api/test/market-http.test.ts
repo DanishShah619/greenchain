@@ -5,7 +5,7 @@ import {buildApp} from '../src/bootstrap/app.js';
 import {marketConfig} from '../src/bootstrap/config.js';
 import {migratedPglite} from './support/pglite.js';
 import {hashPassword} from '../src/kernel/password.js';
-import {seedDemoMarket,DEMO_PRICE_PAISE} from '../src/modules/market/application/seed.js';
+import {seedDemoMarket,DEMO_PRICE_PAISE,SHOWCASE_MARKET} from '../src/modules/market/application/seed.js';
 import {DEFAULT_MARKET} from '../src/modules/market/application/orders.js';
 import {DEFAULT_PAYMENTS} from '../src/modules/market/application/payments.js';
 import {WEBHOOK_PATH} from '../src/modules/market/http/routes.js';
@@ -62,6 +62,12 @@ test('a buyer browses, orders, pays through the simulator and owns the credits; 
     assert.doesNotMatch(JSON.stringify(listed),/Market seed farmer|Synthetic village/);
     assert.equal((await f.send('GET','/api/v1/demo/orders',buyer)).statusCode,403);
     assert.deepEqual(await assertMarketInvariants(f.db),[]);
+    // The invariant report for the presenter (and the market smoke script): codes and counts only.
+    assert.deepEqual((await f.send('GET','/api/v1/demo/invariants',presenter)).json().violations,[]);
+    assert.equal((await f.send('GET','/api/v1/demo/invariants',buyer)).statusCode,403);
+    await f.db.query(`INSERT INTO demo_payment_events(provider,provider_event_id,attempt_id,scenario_id,type,payload_hash,amount_paise,outcome)
+      SELECT 'simulator','evt_stranded',id,scenario_id,'payment.succeeded','h',5,'AMOUNT_MISMATCH' FROM demo_payment_attempts LIMIT 1`);
+    assert.deepEqual((await f.send('GET','/api/v1/demo/invariants',presenter)).json().violations,[{code:'CAPTURE_NOT_ACCOUNTED',count:1}]);
   }finally{await f.close();}
 });
 test('role matrix: buyer routes are buyer-only, and a buyer is refused on agent and verifier routes',async()=>{
@@ -149,6 +155,7 @@ test('without a webhook secret neither the webhook nor the simulator exists; wit
     const presenter=await live.login('presenter');
     assert.equal((await live.send('POST',`/api/v1/demo/orders/${randomUUID()}/simulate`,presenter,{outcome:'success'})).statusCode,404);
     assert.equal((await live.send('GET','/api/v1/demo/orders',presenter)).statusCode,404);
+    assert.equal((await live.send('GET','/api/v1/demo/invariants',presenter)).statusCode,404);
   }finally{await live.close();}
 });
 test('market configuration from the environment is validated',()=>{
@@ -168,6 +175,22 @@ test('the demo market seed is idempotent and leaves sold credits alone',async()=
   assert.equal((await db.query(`SELECT count(*)::int AS n FROM demo_credits`)).rows[0].n,200);
   assert.equal((await db.query(`SELECT count(*)::int AS n FROM demo_credits WHERE state='REVERSED'`)).rows[0].n,20,'existing state preserved');
   assert.equal((await db.query(`SELECT count(*)::int AS n FROM demo_price_list`)).rows[0].n,1);
+});
+test('the public showcase shows read-only sample market counts and hides the seed\'s synthetic cases',async()=>{
+  const f=await fixture();
+  try{
+    await f.db.query("INSERT INTO scenarios(id) VALUES ('showcase')");await f.db.query("INSERT INTO demo_namespaces(scenario_id) VALUES ('showcase')");
+    await f.db.query(`INSERT INTO captures(scenario_id,event_id,actor_id,fingerprint,farmer_label,village,area_hectares) VALUES ('showcase',$1,'seed','fixture','Demo farmer 01','Nadia',1.25)`,[randomUUID()]);
+    assert.deepEqual(await seedDemoMarket(f.db,SHOWCASE_MARKET),{groupsCreated:6});
+    const r=await f.app.inject({url:'/api/v1/showcase'});assert.equal(r.statusCode,200);
+    const body=r.json();
+    assert.deepEqual(body.captures.map((c:any)=>c.farmer_label),['Demo farmer 01'],'the market seed\'s cases are not showcase captures');
+    assert.deepEqual(body.market,{namespace:'DEMO_ONLY',label:'Demonstration — synthetic credits and simulated payments',currency:'INR',
+      unitPricePaise:String(DEMO_PRICE_PAISE),groups:6,available:30,reserved:0,sold:0});
+    assert.doesNotMatch(JSON.stringify(body.market),/Group |batch|DEMO-2026|Market seed/,'totals only: no groups, ids or provenance');
+    // The presenter's market is a different scenario and is not counted.
+    assert.equal((await f.db.query(`SELECT count(*)::int AS n FROM demo_credits c JOIN demo_issuance_batches b ON b.id=c.batch_id WHERE b.scenario_id='presenter'`)).rows[0].n,200);
+  }finally{await f.close();}
 });
 test('CORS preflight allows every method the web app uses (sign-out is DELETE, boundary and chunk uploads are PUT)',async()=>{
   const f=await fixture();

@@ -40,6 +40,44 @@ test('buyer responses never contain farmer names, villages or internal case data
   const v=await order(db,b1,1),text=JSON.stringify([v,await getOrder(db,b1,v.order.id),await listOrders(db,b1)]);
   assert.doesNotMatch(text,new RegExp(`${PII_LABEL}|${PII_VILLAGE}|area|village|farmer`,'i'));
   assert.match(v.items[0].group,/^Group [0-9A-F]{6}$/);assert.equal(v.namespace,'DEMO_ONLY');
+  // docs/22 §9: every buyer response carries the demonstration label, not only the inventory.
+  for(const response of [v,await getOrder(db,b1,v.order.id),await listOrders(db,b1),await cancelOrder(db,b1,v.order.id)])
+    assert.equal(response.label,'Demonstration — synthetic credits and simulated payments');
+});
+test('the allocation log keeps each group\'s inputs, weight and quota with the cap and the result',async()=>{
+  const {db}=await market(5,10);
+  await order(db,b2,1);
+  const v=await order(db,b1,4);
+  const detail=(await db.query('SELECT detail FROM demo_allocation_log WHERE order_id=$1',[v.order.id])).rows[0].detail;
+  const logged=typeof detail==='string'?JSON.parse(detail):detail;
+  assert.equal(logged.cap,1);assert.equal(logged.groups.length,5);
+  // One group already has a credit reserved for buyer 2: quota max(1, floor(0.5 x (9 + 1))) = 5; the others max(1, floor(0.5 x 10)) = 5.
+  assert.ok(logged.groups.every((g:any)=>g.weight===1&&g.quota===5&&typeof g.waitingDays==='number'),JSON.stringify(logged.groups));
+  assert.deepEqual(logged.groups.map((g:any)=>g.reserved).sort(),[0,0,0,0,1]);
+});
+test('a unique-index conflict on an order item is retried in a fresh transaction, never a 500',async()=>{
+  // Transient: the first insert of an order item fails as if another writer held the credit; the retry re-reads and succeeds.
+  {const {db}=await market(5,10);
+   await db.query('CREATE SEQUENCE test_fault_once');
+   await db.query(`CREATE FUNCTION test_fault_once() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+     IF nextval('test_fault_once')=1 THEN RAISE EXCEPTION 'injected item conflict' USING ERRCODE='unique_violation'; END IF; RETURN NEW; END; $$`);
+   await db.query('CREATE TRIGGER test_fault_once BEFORE INSERT ON demo_order_items FOR EACH ROW EXECUTE FUNCTION test_fault_once()');
+   const v=await order(db,b1,1);
+   assert.equal(v.order.state,'RESERVED');assert.equal(v.replayed,false);
+   assert.equal((await db.query('SELECT count(*)::int AS n FROM demo_orders')).rows[0].n,1,'the failed first try left nothing behind');
+   await clean(db);}
+  // Persistent: a hold written behind the lock's back keeps conflicting, so the buyer gets a retryable 503 and nothing is written.
+  {const {db}=await market(1,10);
+   const first=await order(db,b2,1);await cancelOrder(db,b2,first.order.id);
+   await db.query(`INSERT INTO demo_order_items(order_id,scenario_id,credit_id,group_id,generation,active) SELECT order_id,scenario_id,credit_id,group_id,2,true FROM demo_order_items WHERE order_id=$1`,[first.order.id]);
+   const requestId=randomUUID();
+   await assert.rejects(order(db,b1,1,{requestId}),(e:any)=>{assert.equal(e?.code,'ALLOCATION_CONFLICT');assert.equal(e?.status,503);return true;});
+   assert.equal((await db.query('SELECT count(*)::int AS n FROM demo_orders')).rows[0].n,1,'no second order');
+   assert.equal(await credits(db,'RESERVED'),0);
+   // Once the stray hold is gone, the buyer's retry with the same request id goes through.
+   await db.query('UPDATE demo_order_items SET active=false WHERE order_id=$1 AND active',[first.order.id]);
+   assert.equal((await order(db,b1,1,{requestId})).order.state,'RESERVED');
+   await clean(db);}
 });
 test('a request id is idempotent per buyer: replay returns the same order, a different body is KEY_REUSE',async()=>{
   const {db}=await market(20,10);const requestId=randomUUID();

@@ -81,9 +81,18 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
 - Step 5: the worker sweeps the market (reaper backstop, delayed refund settlement, scheduled invariant check with a violation gauge) and exports market gauges; the API counts webhook and order outcomes and scenario-lock waits on an optional loopback metrics port. A live run of API and worker against a throwaway database expired a lapsed order within seconds; both logs were clean and secret-free.
 - Step 6: buyer marketplace and order screens and the presenter's simulated-provider panel in the PWA. Checked in a browser against a throwaway database: buyer sign-in, a 20-credit order (exact ₹ totals, countdown, allocation explanation), payment, presenter success from a separate session with the buyer page updating by itself, a replayed callback leaving the ledger unchanged (20 rows, 1 event before and after), presenter panel, sign-out, and no horizontal overflow at 375 px. That check found a pre-existing bug: CORS allowed only GET/HEAD/POST, so cross-origin sign-out (DELETE) and boundary/evidence uploads (PUT) failed in browsers; fixed with a regression test.
 - Service worker in the embedded test browser (diagnosed 2026-10-22): registration fails there for any service worker, not just ours. A minimal two-line worker on a separate origin fails with the same error, and server request logs show the browser never sends the service-worker script request (no `Service-Worker: script` fetch arrives), while ordinary fetches of `sw.js` succeed. It is a limitation of that browser, not of the app. Offline behaviour still needs confirming in a regular browser and on real phones (deferred).
+- Spec-conformance fixes (2026-10-22, [document 22 §15](22-demo-buyer-purchase.md)):
+  - A credit-hold conflict is retried instead of answered with a 500.
+  - The refund invariant also checks that captured money is accounted for.
+  - Every buyer response carries the demonstration label, and the allocation log records weights and quotas.
+  - The public showcase shows sample market counts.
+  - A correct payment after a wrong-amount one on the same attempt is applied (decision B13, a proposal).
+  - The webhook is part of the interleaving race test, with a new pg test for simulate under a held lock.
+  - `scripts/demo-market-smoke.mjs` exists, with a presenter-only invariant report.
+  - The smoke script has not yet been run against a live local demo.
 
 ## Remaining release work
 
-This does not complete week 1 or the public release gate: hosted staging, deployed PostgreSQL checks, phone OTP, production role/device policies, versioned migrations, private object storage, cross-plot spatial checks and operational hardening remain. Offline shell behaviour is implemented and covered by automated worker/storage tests; real-device verification is still pending. Evidence approval does not make a credit or MRV/calculation-verification claim.
+This does not complete week 1 or the public release gate: hosted staging, deployed PostgreSQL checks, phone OTP, production role/device policies, private object storage, cross-plot spatial checks and operational hardening remain. Offline shell behaviour is implemented and covered by automated worker/storage tests; real-device verification is still pending. Evidence approval does not make a credit or MRV/calculation-verification claim.
 
 Use document 13 as the sequencing baseline; production requirements remain in the existing design documents. Updated supported dependency versions are resolved during scaffold setup and recorded in package-lock.json; static export and monolith architecture remain unchanged.

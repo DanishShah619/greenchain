@@ -103,8 +103,11 @@ async function apply(tx:Database,ev:ProviderEvent,l:Locked,asOf:Date,config:Paym
     if(ev.amountPaise!==money(attempt.amount_paise)||ev.currency!=='INR'||money(attempt.amount_paise)!==money(order.payable_paise)){
       await succeed(tx,attempt.id,true);await refund(tx,l,'AMOUNT_MISMATCH',ev.amountPaise);return 'AMOUNT_MISMATCH';
     }
-    // The same charge reported again (a new event id for an already successful attempt) is not a second payment.
-    if(attempt.state==='SUCCEEDED')return 'IGNORED_SAME_ATTEMPT';
+    // The same charge reported again (a new event id for an attempt whose correct-amount success was already applied) is not a
+    // second payment. A wrong-amount success does not count: it was refunded on its own, so a correct one after it is a real
+    // payment and goes on to the branches below (docs/22 §6.1), instead of being ignored with the money never returned.
+    if(attempt.state==='SUCCEEDED'&&(await tx.query(`SELECT 1 FROM demo_payment_events WHERE attempt_id=$1 AND type='payment.succeeded'
+      AND outcome IN ('FULFILLED','REVALIDATED_FULFILLED','REFUND_LATE_UNFILLABLE','REFUND_DUPLICATE_ATTEMPT') LIMIT 1`,[attempt.id])).rows.length)return 'IGNORED_SAME_ATTEMPT';
   }else{
     if(!['CREATED','PENDING'].includes(attempt.state))return 'IGNORED_TERMINAL';
     const next=ev.type==='payment.pending'?'PENDING':ev.type==='payment.failed'?'FAILED':'CANCELLED';

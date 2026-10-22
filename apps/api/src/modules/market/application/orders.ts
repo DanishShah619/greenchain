@@ -3,7 +3,7 @@ import type {Database} from '../../../kernel/database.js';
 import {WorkflowError} from '../../../kernel/errors.js';
 import {appendAudit} from '../../audit/application/audit.js';
 import type {Actor} from '../../capture/application/capture.js';
-import {allocateFcaeV0,waitingDays,type FcaeResult,type GroupInput} from '../domain/fcae.js';
+import {allocateFcaeV0,quotaFor,TIER_WEIGHT_V0,waitingDays,type FcaeResult,type GroupInput} from '../domain/fcae.js';
 import {withScenarioLock} from './lock.js';
 /** Buyer orders: create (allocate and reserve), accept a partial offer, cancel, and the reservation reaper (docs/22 §6.2-6.3). */
 export type MarketConfig={commissionBps:number;reservationSeconds:number;shortfallHoldSeconds:number};
@@ -11,6 +11,8 @@ export const DEFAULT_MARKET:MarketConfig={commissionBps:500,reservationSeconds:3
 /** Orders that hold credits and count toward a buyer's open-order limit. */
 export const HOLDING_STATES=['RESERVED','AWAITING_PAYMENT','REVALIDATING'];
 export const BUYER_MAX_OPEN_ORDERS=3,BUYER_MAX_SUPPLY_SHARE=0.10;
+/** Carried by every buyer response (docs/22 §9), next to namespace DEMO_ONLY. */
+export const DEMO_LABEL='Demonstration — synthetic credits and simulated payments';
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const sha=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const money=(value:unknown)=>BigInt(String(value));
@@ -66,9 +68,10 @@ async function checkLimits(tx:Database,actor:Actor,wanted:number){
   if(row.open>=BUYER_MAX_OPEN_ORDERS)throw new WorkflowError('BUYER_LIMIT',422);
   if(row.reserved+wanted>Math.max(1,Math.floor(BUYER_MAX_SUPPLY_SHARE*row.eligible)))throw new WorkflowError('BUYER_LIMIT',422);
 }
+/** One immutable row per allocation revision: per-group inputs, weight and quota, the cap, the result and any shortfall (docs/22 §5). */
 async function logAllocation(tx:Database,orderId:string,scenarioId:string,revision:number,asOf:Date,capBasisQ:number,inputs:GroupInput[],result:FcaeResult,take?:number){
   const detail={take:take??null,cap:result.cap,ok:result.ok,reason:result.ok?null:result.reason,offeredCount:result.ok?null:result.offeredCount,
-    groups:inputs.map(g=>({groupId:g.groupId,available:g.available,reserved:g.reserved,waitingDays:g.waitingDays})),
+    groups:inputs.map(g=>({groupId:g.groupId,available:g.available,reserved:g.reserved,waitingDays:g.waitingDays,weight:TIER_WEIGHT_V0,quota:quotaFor(g.available,g.reserved)})),
     allocations:result.allocations};
   await tx.query('INSERT INTO demo_allocation_log(order_id,scenario_id,revision,as_of,cap_basis_q,detail) VALUES ($1,$2,$3,$4,$5,$6)',[orderId,scenarioId,revision,asOf,capBasisQ,JSON.stringify(detail)]);
 }
@@ -117,7 +120,7 @@ export async function orderView(tx:Database,order:Record<string,any>,extra:{repl
   const refunds=(await tx.query('SELECT kind,state,amount_paise FROM demo_payment_refunds WHERE order_id=$1 ORDER BY created_at,id',[order.id])).rows;
   const ledger=(await tx.query('SELECT credit_id,gross_paise FROM demo_ledger_entries WHERE order_id=$1 ORDER BY credit_id',[order.id])).rows;
   return {
-    namespace:'DEMO_ONLY' as const,replayed:extra.replayed,
+    namespace:'DEMO_ONLY' as const,label:DEMO_LABEL,replayed:extra.replayed,
     priceChangedFromQuote:extra.quotedTotalPaise!==undefined&&extra.quotedTotalPaise!==String(unitPrice*BigInt(order.quantity)),
     order:{id:order.id as string,state:order.state as string,quantity:order.quantity as number,allocatedQuantity:order.allocated_quantity as number,
       currency:'INR' as const,unitPricePaise:String(unitPrice),principalPaise:String(order.principal_paise),taxPaise:String(order.tax_paise),taxRule:order.tax_rule as string,
@@ -143,6 +146,22 @@ export async function ownedOrder(tx:Database,actor:Actor,orderId:string,lock:boo
 }
 const byRequest=async(tx:Database,actor:Actor,requestId:string)=>(await tx.query('SELECT * FROM demo_orders WHERE scenario_id=$1 AND buyer_id=$2 AND request_id=$3',[actor.scenarioId,actor.id,requestId])).rows[0];
 /**
+ * The unique indexes backstop the scenario lock (docs/22 §6.3), so a 23505 is never answered with a 500. A request-key conflict
+ * means another request with this key won: `replayed` answers with its order. An item-index conflict means a credit was held by a
+ * writer that bypassed the lock; everything rolled back, so the work runs once more in a fresh transaction that re-reads supply.
+ * If that conflicts too, the caller gets a retryable 503.
+ */
+async function backstopUniqueViolation<T>(work:()=>Promise<T>,replayed:()=>Promise<T|undefined>=async()=>undefined):Promise<T>{
+  for(let tries=1;;tries++){
+    try{return await work();}
+    catch(error){
+      if(!isUniqueViolation(error))throw error;
+      const prior=await replayed();if(prior)return prior;
+      if(tries>=2)throw new WorkflowError('ALLOCATION_CONFLICT',503);
+    }
+  }
+}
+/**
  * POST /orders. One transaction under the scenario lock: replay check, reap, buyer limits, price, FCAE v0, then either a
  * RESERVED order with held credits or a CREATED order carrying a shortfall offer and nothing reserved.
  */
@@ -153,8 +172,7 @@ export async function createOrder(db:Database,actor:Actor,input:CreateOrderInput
     if(prior.request_hash!==requestHash)throw new WorkflowError('KEY_REUSE');
     return orderView(tx,prior,{replayed:true,quotedTotalPaise:input.quotedTotalPaise});
   };
-  try{
-    return await withScenarioLock(db,actor.scenarioId,async(tx,asOf)=>{
+  return backstopUniqueViolation(()=>withScenarioLock(db,actor.scenarioId,async(tx,asOf)=>{
       const prior=await byRequest(tx,actor,input.requestId);
       if(prior)return replay(prior,tx);
       await reapExpired(tx,actor.scenarioId,asOf,config);
@@ -173,12 +191,8 @@ export async function createOrder(db:Database,actor:Actor,input:CreateOrderInput
         await audit(tx,actor,anchor,'market.order.reserved',{orderId:id,quantity:allocated,unitPricePaise:String(price.unitPrice)});
       }
       return orderView(tx,order,{replayed:false,quotedTotalPaise:input.quotedTotalPaise});
-    });
-  }catch(error){
-    // Two first-time requests with one key: the unique index backstops the lock. Answer as a replay, never with a 500.
-    if(!isUniqueViolation(error))throw error;
-    return db.transaction(async tx=>{const prior=await byRequest(tx,actor,input.requestId);if(!prior)throw error;return replay(prior,tx);});
-  }
+    }),
+    ()=>db.transaction(async tx=>{const prior=await byRequest(tx,actor,input.requestId);return prior?replay(prior,tx):undefined;}));
 }
 /**
  * Accept the partial offer of a shortfall order. Allocation is re-run under the lock for exactly the offered count, with the cap
@@ -186,7 +200,7 @@ export async function createOrder(db:Database,actor:Actor,input:CreateOrderInput
  */
 export async function acceptPartial(db:Database,actor:Actor,orderId:string,config:MarketConfig=DEFAULT_MARKET):Promise<OrderView>{
   requireBuyer(actor);
-  return withScenarioLock(db,actor.scenarioId,async(tx,asOf)=>{
+  return backstopUniqueViolation(()=>withScenarioLock(db,actor.scenarioId,async(tx,asOf)=>{
     const order=await ownedOrder(tx,actor,orderId,true);
     if(order.state!=='CREATED'){
       // A repeated accept after success is answered with the current order.
@@ -211,7 +225,7 @@ export async function acceptPartial(db:Database,actor:Actor,orderId:string,confi
     const anchor=await reserve(tx,actor.scenarioId,order.id,result,1);
     await audit(tx,actor,anchor,'market.order.reserved',{orderId:order.id,quantity:offered,partial:true,unitPricePaise:String(order.unit_price_paise)});
     return orderView(tx,updated,{replayed:false});
-  });
+  }));
 }
 /** Cancel an order that has not been paid. Idempotent: cancelling a cancelled order returns it unchanged. */
 export async function cancelOrder(db:Database,actor:Actor,orderId:string):Promise<OrderView>{
@@ -234,6 +248,6 @@ export async function getOrder(db:Database,actor:Actor,orderId:string):Promise<O
 export async function listOrders(db:Database,actor:Actor){
   requireBuyer(actor);
   const rows=(await db.query(`SELECT id,state,quantity,allocated_quantity,payable_paise,reserved_until,created_at FROM demo_orders WHERE scenario_id=$1 AND buyer_id=$2 ORDER BY created_at DESC,id LIMIT 50`,[actor.scenarioId,actor.id])).rows;
-  return {namespace:'DEMO_ONLY' as const,orders:rows.map(r=>({id:r.id as string,state:r.state as string,quantity:r.quantity as number,allocatedQuantity:r.allocated_quantity as number,
+  return {namespace:'DEMO_ONLY' as const,label:DEMO_LABEL,orders:rows.map(r=>({id:r.id as string,state:r.state as string,quantity:r.quantity as number,allocatedQuantity:r.allocated_quantity as number,
     payablePaise:String(r.payable_paise),reservedUntil:iso(r.reserved_until),createdAt:iso(r.created_at)}))};
 }
