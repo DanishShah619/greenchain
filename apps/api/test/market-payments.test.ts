@@ -11,6 +11,8 @@ import {chainAudit,verifyAuditFull} from '../src/modules/audit/application/audit
 import type {Database} from '../src/kernel/database.js';
 const config:PaymentConfig={...DEFAULT_PAYMENTS,secrets:['test-webhook-secret-current','test-webhook-secret-previous']};
 const b1=buyer('buyer-1'),b2=buyer('buyer-2'),presenter={id:'presenter',scenarioId:'market',role:'agent'};
+/** The outcome of a simulated delivery (refund settlement returns counts instead). */
+const outcomeOf=(r:Awaited<ReturnType<typeof simulate>>)=>'outcome' in r?r.outcome:undefined;
 const code=(c:string)=>(e:any)=>{assert.equal(e?.code,c);return true;};
 const clean=async(db:Database)=>assert.deepEqual(await assertMarketInvariants(db,{lapseGraceSeconds:3600}),[]);
 const count=async(db:Database,sql:string,values:unknown[]=[])=>(await db.query(sql,values)).rows[0].n as number;
@@ -69,7 +71,7 @@ test('a correct-amount success after a wrong-amount one on the same attempt is a
 test('a second attempt that also captures money is refunded and the order is untouched',async()=>{
   const {db,order,providerRef}=await setup();
   await deliver(db,providerRef,'payment.succeeded');
-  assert.equal((await simulate(db,presenter,order.order.id,'double_charge',config) as any).outcome,'REFUND_DUPLICATE_ATTEMPT');
+  assert.equal(outcomeOf(await simulate(db,presenter,order.order.id,'double_charge',config)),'REFUND_DUPLICATE_ATTEMPT');
   let v=await getOrder(db,b1,order.order.id);assert.equal(v.order.state,'FULFILLED');assert.deepEqual(v.refunds,[{kind:'DUPLICATE_ATTEMPT',state:'PENDING',amountPaise:String(PRICE*2n)}]);
   await settleRefunds(db,'market');
   v=await getOrder(db,b1,order.order.id);assert.equal(v.order.state,'FULFILLED');assert.equal(v.refunds[0].state,'REFUNDED');
@@ -98,8 +100,7 @@ test('an amount or currency mismatch refunds the captured amount on every branch
 });
 test('late success with the credits still free fulfils through a new generation of holds',async()=>{
   const {db,order}=await setup();
-  const r=await simulate(db,presenter,order.order.id,'late_success',config) as any;
-  assert.equal(r.outcome,'REVALIDATED_FULFILLED');
+  assert.equal(outcomeOf(await simulate(db,presenter,order.order.id,'late_success',config)),'REVALIDATED_FULFILLED');
   const v=await getOrder(db,b1,order.order.id);assert.equal(v.order.state,'FULFILLED');
   assert.deepEqual(v.items.map(i=>i.creditId).sort(),order.items.map(i=>i.creditId).sort(),'the same credits');
   const gens=(await db.query('SELECT generation,active FROM demo_order_items WHERE order_id=$1 ORDER BY generation,credit_id',[order.order.id])).rows;
@@ -186,7 +187,9 @@ test('if applying fails, nothing is recorded and the redelivered event is applie
   await db.query(`CREATE FUNCTION test_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected fault'; END; $$`);
   await db.query('CREATE TRIGGER test_fault BEFORE INSERT ON demo_ledger_entries FOR EACH ROW EXECUTE FUNCTION test_fault()');
   const id='evt_retry';
-  assert.deepEqual(await deliver(db,providerRef,'payment.succeeded',{id}),{status:503,code:'PAYMENT_APPLY_FAILED',eventId:id});
+  const failed=await deliver(db,providerRef,'payment.succeeded',{id});
+  assert.equal(failed.status,503);assert.equal(failed.code,'PAYMENT_APPLY_FAILED');assert.equal(failed.eventId,id);
+  assert.equal(failed.error?.errorCode,'P0001','the cause is reported for the log (never in the response)');
   assert.equal(await count(db,'SELECT count(*)::int AS n FROM demo_payment_events'),0,'the event is not recorded');
   assert.equal((await getOrder(db,b1,order.order.id)).order.state,'AWAITING_PAYMENT');
   await db.query('DROP TRIGGER test_fault ON demo_ledger_entries');
@@ -197,7 +200,7 @@ test('simulator: presenter only; replay resends the exact last event; refund set
   const {db,order}=await setup();
   await assert.rejects(simulate(db,b1,order.order.id,'success',config),code('FORBIDDEN'));
   await assert.rejects(simulate(db,presenter,randomUUID(),'success',config),code('NOT_FOUND'));
-  assert.equal((await simulate(db,presenter,order.order.id,'success',config) as any).outcome,'FULFILLED');
+  assert.equal(outcomeOf(await simulate(db,presenter,order.order.id,'success',config)),'FULFILLED');
   assert.deepEqual(await simulate(db,presenter,order.order.id,'replay',config),{status:200,outcome:'FULFILLED',replayed:true});
   assert.deepEqual(await simulate(db,presenter,order.order.id,'refund',config),{status:200,settled:0,closed:0});
   await clean(db);

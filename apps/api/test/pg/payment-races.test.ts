@@ -108,3 +108,24 @@ test('an apply that fails is not recorded, and concurrent redeliveries afterward
     assert.deepEqual(await assertMarketInvariants(t.db),[]);
   }finally{await t.close();}
 });
+test('a failing event delivered concurrently is counted exactly, parked once, and never applied',opts,async()=>{
+  const t=await createTestDatabase();
+  try{
+    await seedMarket(t.db,{groups:20,perGroup:10});const o=await paying(t.db);
+    await t.db.query(`CREATE FUNCTION test_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected fault'; END; $$`);
+    await t.db.query('CREATE TRIGGER test_fault BEFORE INSERT ON demo_ledger_entries FOR EACH ROW EXECUTE FUNCTION test_fault()');
+    const strict={...config,maxEventFailures:3},delivery=success(o.ref,'evt_dead');
+    const pools=Array.from({length:4},()=>t.connect());
+    const out=values(await race(8,i=>handlePaymentEvent(pools[i%4],delivery,strict)));
+    const failed=out.filter(r=>r.status===503).length,parkedNow=out.filter(r=>r.justParked).length;
+    assert.equal(parkedNow,1,`exactly one delivery parks it: ${JSON.stringify(out.map(r=>r.code))}`);
+    assert.ok(out.every(r=>r.status===503||(r.status===200&&r.parked)),'every delivery either failed or was told the event is parked');
+    const row=(await t.db.query(`SELECT failures,parked FROM demo_payment_event_failures WHERE provider_event_id='evt_dead'`)).rows[0];
+    // Deliveries that raced past the parked check before the bound was reached still attempted the apply; each carries its cause.
+    const attempted=out.filter(r=>r.error).length;
+    assert.ok(failed>=1&&attempted>=failed+parkedNow);
+    assert.equal(row.parked,true);assert.equal(row.failures,attempted,'every attempted apply is counted exactly once');
+    assert.equal(await n(t.db,'SELECT count(*)::int AS n FROM demo_payment_events'),0);
+    assert.deepEqual(await assertMarketInvariants(t.db),[]);
+  }finally{await t.close();}
+});

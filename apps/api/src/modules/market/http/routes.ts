@@ -46,13 +46,18 @@ export async function registerMarketRoutes(app:FastifyInstance,db:Database,actor
         const header=(name:string)=>{const v=request.headers[name];return typeof v==='string'?v:undefined;};
         const result=await handlePaymentEvent(db,{body:Buffer.isBuffer(request.body)?request.body:Buffer.alloc(0),signature:header('x-greenchain-signature'),timestamp:header('x-greenchain-timestamp')},config.payments);
         metrics?.inc('greenchain_webhook_requests_total',{status:String(result.status)});
-        if(result.status===200)metrics?.inc('greenchain_payment_events_applied_total',{outcome:result.outcome!});
-        else if(result.status>=500)metrics?.inc('greenchain_payment_event_failures_total',{code:result.code??'UNKNOWN'});
-        else metrics?.inc('greenchain_webhook_rejected_total',{reason:result.code??'UNKNOWN'});
-        // The provider event id is the provider's own reference (not a secret); it lets an operator find repeated failures.
-        if(result.status>=500)request.log.error({code:result.code,eventId:result.eventId},'Payment event could not be applied; the provider will retry');
+        // An apply that failed is counted whether the event goes back to the provider (503) or is parked on this delivery.
+        if(result.status>=500||result.justParked)metrics?.inc('greenchain_payment_event_failures_total',{code:result.code==='EVENT_PARKED'?'PAYMENT_APPLY_FAILED':result.code??'UNKNOWN'});
+        if(result.justParked)metrics?.inc('greenchain_payment_events_parked_total');
+        else if(result.outcome)metrics?.inc('greenchain_payment_events_applied_total',{outcome:result.outcome});
+        else if(result.status<500&&!result.parked)metrics?.inc('greenchain_webhook_rejected_total',{reason:result.code??'UNKNOWN'});
+        // The provider event id is the provider's own reference (not a secret). `error` holds only an error class and machine code.
+        const cause={eventId:result.eventId,...result.error,...(result.failureNotRecorded?{failureNotRecorded:true}:{})};
+        if(result.justParked)request.log.error({code:result.code,...cause},'Payment event parked after repeated failures; an operator must retry it (npm run payments)');
+        else if(result.status>=500)request.log.error({code:result.code,...cause},'Payment event could not be applied; the provider will retry');
         else if(result.status!==200)request.log.warn({code:result.code,status:result.status,eventId:result.eventId},'Payment event rejected');
-        return reply.code(result.status).send(result.status===200?{received:true,outcome:result.outcome,replayed:result.replayed??false}:{code:result.code,retryable:result.status>=500});
+        const response=result.parked?{received:true,parked:true}:result.status===200?{received:true,outcome:result.outcome,replayed:result.replayed??false}:{code:result.code,retryable:result.status>=500};
+        return reply.code(result.status).send(response);
       });
     });
   }

@@ -140,7 +140,12 @@ test('complete capture → polygon → resumed proof uploads → submission → 
     assert.equal((await f.db.query("SELECT count(*)::int AS n FROM audit_events WHERE event_type='demo.calculation.recorded'")).rows[0].n,4);
     await assert.rejects(()=>f.db.query('UPDATE demo_calculation_runs SET preset=$1 WHERE id=$2',['cloudy',run.id]));
     await assert.rejects(()=>f.db.query('DELETE FROM demo_calculation_runs WHERE id=$1',[run.id]));
+    // The database now refuses to change an approved case's plot (0007). The application's own STALE_EVIDENCE check is the
+    // second line of defence, so it is still exercised by bypassing the guard for this one write.
+    await assert.rejects(f.db.query('UPDATE plots SET area_hectares=$1 WHERE capture_id=$2',['99.0000',id]),/only change while its case is DRAFT/);
+    await f.db.query('ALTER TABLE plots DISABLE TRIGGER plots_guard');
     await f.db.query('UPDATE plots SET area_hectares=$1 WHERE capture_id=$2',['99.0000',id]);
+    await f.db.query('ALTER TABLE plots ENABLE TRIGGER plots_guard');
     assert.equal((await f.send('POST',`/cases/${id}/demo-calculations`,{...calc,requestId:randomUUID()})).json().code,'STALE_EVIDENCE');
     // A separate fully submitted case exercises the immutable rejection branch.
     const rejectedId=await f.create();

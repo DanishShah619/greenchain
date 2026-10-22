@@ -1,6 +1,6 @@
 import {createHash,createHmac,randomUUID,timingSafeEqual} from 'node:crypto';
 import type {Database} from '../../../kernel/database.js';
-import {WorkflowError} from '../../../kernel/errors.js';
+import {WorkflowError,safeErrorFields} from '../../../kernel/errors.js';
 import {appendAudit} from '../../audit/application/audit.js';
 import type {Actor} from '../../capture/application/capture.js';
 import {ledgerLine} from '../domain/money.js';
@@ -19,13 +19,21 @@ export type PaymentConfig={
   /** A PENDING confirmation extends the reservation to now + this, capped at allocated_at + maxHoldSeconds. */
   pendingExtensionSeconds:number;maxHoldSeconds:number;
   maxBodyBytes:number;
+  /** Failed applies of one event before it is parked as a dead letter (the provider then stops retrying). */
+  maxEventFailures:number;
 };
-export const DEFAULT_PAYMENTS:Omit<PaymentConfig,'secrets'>={provider:'simulator',toleranceSeconds:300,pendingExtensionSeconds:900,maxHoldSeconds:1800,maxBodyBytes:16384};
+export const DEFAULT_PAYMENTS:Omit<PaymentConfig,'secrets'>={provider:'simulator',toleranceSeconds:300,pendingExtensionSeconds:900,maxHoldSeconds:1800,maxBodyBytes:16384,maxEventFailures:8};
 export const EVENT_TYPES=['payment.pending','payment.succeeded','payment.failed','payment.cancelled'] as const;
 export type ProviderEvent={id:string;type:typeof EVENT_TYPES[number];providerRef:string;amountPaise:bigint;currency:string};
 export type PaymentOutcome='FULFILLED'|'REVALIDATED_FULFILLED'|'REFUND_LATE_UNFILLABLE'|'REFUND_DUPLICATE_ATTEMPT'|'AMOUNT_MISMATCH'|'ATTEMPT_UPDATED'|'IGNORED_SAME_ATTEMPT'|'IGNORED_TERMINAL';
 export type WebhookResult={status:200|400|401|404|409|413|503;code?:string;outcome?:PaymentOutcome;replayed?:boolean;
-  /** The provider's event id, once the signature is verified. For logs only; never in responses. */eventId?:string};
+  /** The provider's event id, once the signature is verified. For logs only; never in responses. */eventId?:string;
+  /** The event is a dead letter: received, not applied, waiting for an operator retry. */parked?:boolean;
+  /** This delivery is the one that parked it. */justParked?:boolean;
+  /** Why the apply failed: error class and machine code (e.g. a SQLSTATE) only. For logs only; never in responses. */
+  error?:{errorName:string;errorCode?:string};
+  /** The failure could not be recorded either (usually the database itself is down); the provider's retry will. */
+  failureNotRecorded?:boolean};
 export type RawWebhook={body:Buffer;signature?:string;timestamp?:string};
 const sha256=(data:Buffer|string)=>createHash('sha256').update(data).digest('hex');
 const money=(value:unknown)=>BigInt(String(value));
@@ -40,11 +48,17 @@ export function verifyWebhook(raw:RawWebhook,config:PaymentConfig,nowMs=Date.now
   const given=Buffer.from(sig,'hex');
   const valid=config.secrets.some(secret=>timingSafeEqual(Buffer.from(signWebhook(secret,ts,raw.body),'hex'),given));
   if(!valid)return {ok:false,status:401,code:'WEBHOOK_SIGNATURE'};
-  let body:any;try{body=JSON.parse(raw.body.toString('utf8'));}catch{return {ok:false,status:400,code:'WEBHOOK_PAYLOAD'};}
+  const event=parseEventBody(raw.body);
+  return event?{ok:true,event}:{ok:false,status:400,code:'WEBHOOK_PAYLOAD'};
+}
+/** Strict parse of an event body. It must be valid UTF-8, so the stored text of a dead letter replays to the same bytes and hash. */
+export function parseEventBody(raw:Buffer):ProviderEvent|null{
+  const text=raw.toString('utf8');
+  if(!Buffer.from(text,'utf8').equals(raw))return null;
+  let body:any;try{body=JSON.parse(text);}catch{return null;}
   const ok=body&&typeof body==='object'&&typeof body.id==='string'&&/^[A-Za-z0-9_.:-]{1,100}$/.test(body.id)&&EVENT_TYPES.includes(body.type)
     &&typeof body.providerRef==='string'&&/^[A-Za-z0-9_.:-]{1,100}$/.test(body.providerRef)&&typeof body.amountPaise==='string'&&/^[0-9]{1,18}$/.test(body.amountPaise)&&typeof body.currency==='string'&&body.currency.length<=8;
-  if(!ok)return {ok:false,status:400,code:'WEBHOOK_PAYLOAD'};
-  return {ok:true,event:{id:body.id,type:body.type,providerRef:body.providerRef,amountPaise:BigInt(body.amountPaise),currency:body.currency}};
+  return ok?{id:body.id,type:body.type,providerRef:body.providerRef,amountPaise:BigInt(body.amountPaise),currency:body.currency}:null;
 }
 /**
  * Start (or resume) payment for a reserved order. The buyer must echo the order's snapshot hash, proving they accepted the
@@ -141,16 +155,24 @@ async function apply(tx:Database,ev:ProviderEvent,l:Locked,asOf:Date,config:Paym
 const isUniqueViolation=(error:unknown)=>(error as {code?:unknown})?.code==='23505';
 /**
  * Webhook entry point. Must be called with no transaction open (it takes the scenario lock itself).
- * 200 = applied or already applied (idempotent); 401/413/400 = rejected before any write; 404 = unknown attempt, nothing written;
- * 409 = the event id was reused with a different body; 503 = the apply failed and was rolled back, so the provider should retry.
+ * 200 = applied or already applied (idempotent), or parked as a dead letter; 401/413/400 = rejected before any write;
+ * 404 = unknown attempt, nothing written; 409 = the event id was reused with a different body; 503 = the apply failed and was
+ * rolled back, so the provider should retry (until the event is parked after maxEventFailures).
  */
 export async function handlePaymentEvent(db:Database,raw:RawWebhook,config:PaymentConfig,nowMs=Date.now()):Promise<WebhookResult>{
   const verified=verifyWebhook(raw,config,nowMs);
   if(!verified.ok)return {status:verified.status,code:verified.code};
-  const ev=verified.event,payloadHash=sha256(raw.body);
+  return applyProviderEvent(db,verified.event,raw.body,config,'delivery');
+}
+async function applyProviderEvent(db:Database,ev:ProviderEvent,body:Buffer,config:PaymentConfig,mode:'delivery'|'operator-retry'):Promise<WebhookResult>{
+  const payloadHash=sha256(body);
   // Immutable columns, so an unlocked read is enough to find the scenario lock to take.
   const target=(await db.query('SELECT id,order_id,scenario_id FROM demo_payment_attempts WHERE provider=$1 AND provider_ref=$2',[config.provider,ev.providerRef])).rows[0];
   if(!target)return {status:404,code:'PAYMENT_UNMATCHED',eventId:ev.id};
+  const failure=(await db.query('SELECT payload_hash,parked FROM demo_payment_event_failures WHERE provider=$1 AND provider_event_id=$2',[config.provider,ev.id])).rows[0];
+  if(failure&&failure.payload_hash!==payloadHash)return {status:409,code:'EVENT_REUSE'};
+  // A parked event is not re-applied by provider redeliveries; only an operator retry applies it.
+  if(failure?.parked&&mode==='delivery')return {status:200,code:'EVENT_PARKED',parked:true,eventId:ev.id};
   const stored=async(tx:Database):Promise<WebhookResult|undefined>=>{
     const prior=(await tx.query('SELECT payload_hash,outcome FROM demo_payment_events WHERE provider=$1 AND provider_event_id=$2',[config.provider,ev.id])).rows[0];
     if(!prior)return undefined;
@@ -165,6 +187,8 @@ export async function handlePaymentEvent(db:Database,raw:RawWebhook,config:Payme
         const anchor=await orderAnchor(tx,target.order_id);
         if(anchor)await appendAudit(tx,systemActor(target.scenario_id),anchor,'market.payment.applied',{orderId:target.order_id,attemptId:target.id,eventId:ev.id,type:ev.type,outcome});
       }
+      // A successful apply retires any earlier failure record, in the same transaction.
+      await tx.query('DELETE FROM demo_payment_event_failures WHERE provider=$1 AND provider_event_id=$2',[config.provider,ev.id]);
       // Last write of the transaction: the event is only ever recorded together with its effect.
       await tx.query(`INSERT INTO demo_payment_events(provider,provider_event_id,attempt_id,scenario_id,type,payload_hash,amount_paise,outcome) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
         [config.provider,ev.id,target.id,target.scenario_id,ev.type,payloadHash,String(ev.amountPaise),outcome]);
@@ -172,8 +196,39 @@ export async function handlePaymentEvent(db:Database,raw:RawWebhook,config:Payme
     });
   }catch(error){
     if(isUniqueViolation(error)){const prior=await db.transaction(stored);if(prior)return prior;}
-    return {status:503,code:error instanceof WorkflowError?error.code:'PAYMENT_APPLY_FAILED',eventId:ev.id};
+    const code=error instanceof WorkflowError?error.code:'PAYMENT_APPLY_FAILED',cause=safeErrorFields(error);
+    // Recorded after the rollback, outside the failed transaction, so the count survives it.
+    let recorded:{parked:boolean;failures:number};
+    try{
+      recorded=(await db.query<{parked:boolean;failures:number}>(`INSERT INTO demo_payment_event_failures(provider,provider_event_id,attempt_id,scenario_id,payload_hash,body,failures,last_code,last_error_name,last_error_code,parked)
+          VALUES ($1,$2,$3,$4,$5,$6,1,$7,$8,$9,$10::int<=1)
+        ON CONFLICT (provider,provider_event_id) DO UPDATE SET failures=demo_payment_event_failures.failures+1,last_code=EXCLUDED.last_code,last_error_name=EXCLUDED.last_error_name,
+          last_error_code=EXCLUDED.last_error_code,last_failed_at=now(),parked=demo_payment_event_failures.parked OR demo_payment_event_failures.failures+1>=$10::int
+        RETURNING parked,failures`,[config.provider,ev.id,target.id,target.scenario_id,payloadHash,body.toString('utf8'),code,cause.errorName,cause.errorCode??null,config.maxEventFailures])).rows[0];
+    }catch{
+      // Usually the database itself is down. Nothing is lost: the provider retries and the next delivery is recorded.
+      return {status:503,code,eventId:ev.id,error:cause,failureNotRecorded:true};
+    }
+    // Exactly one increment reaches the bound, even when deliveries race, so "just parked" is reported once.
+    if(recorded.parked&&mode==='delivery')return {status:200,code:'EVENT_PARKED',parked:true,justParked:recorded.failures===config.maxEventFailures,eventId:ev.id,error:cause};
+    return {status:503,code,eventId:ev.id,error:cause};
   }
+}
+/** Operator action: apply a parked event again (its stored body, no provider needed). It stays parked if it fails again. */
+export async function retryParkedPaymentEvent(db:Database,provider:string,eventId:string,config:PaymentConfig):Promise<WebhookResult>{
+  const row=(await db.query('SELECT body FROM demo_payment_event_failures WHERE provider=$1 AND provider_event_id=$2 AND parked',[provider,eventId])).rows[0];
+  if(!row)throw new WorkflowError('PAYMENT_EVENT_NOT_PARKED',404);
+  const body=Buffer.from(String(row.body),'utf8'),ev=parseEventBody(body);
+  if(!ev)throw new WorkflowError('PAYMENT_EVENT_UNREADABLE',500);
+  return applyProviderEvent(db,ev,body,{...config,provider},'operator-retry');
+}
+/** Failing and parked events for operators and dashboards. The stored body is not returned. */
+export async function listFailedPaymentEvents(db:Database,options:{parkedOnly?:boolean}={}){
+  const rows=(await db.query(`SELECT provider,provider_event_id,attempt_id,scenario_id,failures,last_code,last_error_name,last_error_code,parked,first_failed_at,last_failed_at
+    FROM demo_payment_event_failures WHERE ($1::boolean IS NOT TRUE OR parked) ORDER BY last_failed_at DESC LIMIT 100`,[options.parkedOnly??false])).rows;
+  return rows.map(r=>({provider:r.provider as string,eventId:r.provider_event_id as string,attemptId:r.attempt_id as string,scenarioId:r.scenario_id as string,failures:r.failures as number,
+    lastCode:r.last_code as string,lastErrorName:(r.last_error_name??null) as string|null,lastErrorCode:(r.last_error_code??null) as string|null,parked:r.parked as boolean,
+    firstFailedAt:new Date(r.first_failed_at).toISOString(),lastFailedAt:new Date(r.last_failed_at).toISOString()}));
 }
 /** Settle pending refunds (the simulator's provider confirmation), then close orders whose refunds are all settled. */
 export async function settleRefunds(db:Database,scenarioId:string,options:{olderThanSeconds?:number}={}){

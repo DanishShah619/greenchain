@@ -17,6 +17,7 @@ export function declareMarketWorkerMetrics(metrics:Metrics){
     .declare('greenchain_refunds_settled_total','counter','Refunds settled by the worker sweep.')
     .declare('greenchain_market_invariant_violations','gauge','Market invariant violations found by the last check, by code (docs/22 §8). Any non-zero value is a bug.')
     .declare('greenchain_market_invariant_check_age_seconds','gauge','Seconds since the market invariants were last checked (-1 if never).')
+    .declare('greenchain_payment_events_parked','gauge','Payment events parked as dead letters, waiting for an operator retry. Any non-zero value needs attention.')
     .declare('greenchain_market_sweep_failures_total','counter','Market sweeps that failed (the rest of the worker cycle still ran).');
 }
 /** Counted in the API process, where webhooks and orders arrive. */
@@ -28,5 +29,6 @@ export function declareMarketApiMetrics(metrics:Metrics){
     .declare('greenchain_payment_event_failures_total','counter','Payment events whose apply failed and was rolled back (the provider retries), by code.')
     .declare('greenchain_orders_created_total','counter','POST /orders results: reserved, shortfall, replay, or an error code.')
     .declare('greenchain_scenario_lock_wait_seconds_total','counter','Total time market writers waited for the scenario lock.')
+    .declare('greenchain_payment_events_parked_total','counter','Payment events parked after repeated apply failures.')
     .declare('greenchain_scenario_lock_acquisitions_total','counter','Scenario lock acquisitions (divide the wait total by this for the mean wait).');
 }

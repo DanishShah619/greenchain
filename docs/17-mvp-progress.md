@@ -91,6 +91,11 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
   - `scripts/demo-market-smoke.mjs` exists, with a presenter-only invariant report.
   - The smoke script has not yet been run against a live local demo.
 
+## Backend audit fixes
+
+- A backend audit (2026-10-22) ranked five issues; all are fixed. Migration `0007` freezes evidence uploads, chunks and the plot once a case leaves DRAFT (the basis of review and issuance), enforces the review-case state machine in the database, ties an order's reservation timestamps to its state so no reservation can become unreapable, and adds indexes for the market's hot paths (credits by holding order, refunds by order and pending-by-scenario, payment events by attempt, stale offers). Payment events whose apply keeps failing now report their cause in logs and are parked as dead letters after a bound, with an operator retry.
+- Tests were written first and seen to fail; the concurrent dead-letter race on real PostgreSQL and the guard tests pass, and an existing test that tampered with an approved plot now asserts that the database refuses it (the application's own staleness check is still exercised by bypassing the guard for that one write).
+
 ## Remaining release work
 
 This does not complete week 1 or the public release gate: hosted staging, deployed PostgreSQL checks, phone OTP, production role/device policies, private object storage, cross-plot spatial checks and operational hardening remain. Offline shell behaviour is implemented and covered by automated worker/storage tests; real-device verification is still pending. Evidence approval does not make a credit or MRV/calculation-verification claim.

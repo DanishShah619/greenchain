@@ -16,7 +16,7 @@ async function base(credits=3){
 async function order(db:Database,scenario:string,over:Record<string,any>={}){
   const o={id:randomUUID(),buyer:'buyer-1',request:randomUUID(),quantity:2,allocated:2,state:'RESERVED',...over};
   await db.query(`INSERT INTO demo_orders(id,scenario_id,buyer_id,request_id,request_hash,quantity,allocated_quantity,state,unit_price_paise,price_effective_from,commission_bps,principal_paise,payable_paise,reserved_until,allocated_at)
-    VALUES ($1,$2,$3,$4,'h',$5,$6,$7,$8,now()-interval '1 day',500,$9,$9,now()+interval '5 minutes',now())`,[o.id,scenario,o.buyer,o.request,o.quantity,o.allocated,o.state,PRICE.toString(),(PRICE*BigInt(o.allocated)).toString()]);
+    VALUES ($1,$2,$3,$4,'h',$5,$6,$7,$8,now()-interval '1 day',500,$9,$9,CASE WHEN $7='CREATED' THEN NULL ELSE now()+interval '5 minutes' END,CASE WHEN $7='CREATED' THEN NULL ELSE now() END)`,[o.id,scenario,o.buyer,o.request,o.quantity,o.allocated,o.state,PRICE.toString(),(PRICE*BigInt(o.allocated)).toString()]);
   return o.id as string;
 }
 const hold=(db:Database,orderId:string,scenario:string,creditId:string,generation=1)=>db.query(`INSERT INTO demo_order_items(order_id,scenario_id,credit_id,group_id,generation,active) SELECT $1,$2,c.id,b.capture_id,$4,true FROM demo_credits c JOIN demo_issuance_batches b ON b.id=c.batch_id WHERE c.id=$3`,[orderId,scenario,creditId,generation]);
@@ -65,7 +65,9 @@ test('order states follow the machine; terminal states have no exit; identity is
   for(const next of ['AWAITING_PAYMENT','EXPIRED','REVALIDATING','REFUND_PENDING','REFUNDED'])await move(a,next);
   for(const next of ['RESERVED','FULFILLED','CANCELLED','REVALIDATING'])await assert.rejects(move(a,next),new RegExp('illegal'),`REFUNDED -> ${next}`);
   const b=await order(db,s.scenario,{state:'CREATED',allocated:0});
-  await assert.rejects(move(b,'FULFILLED'));await assert.rejects(move(b,'AWAITING_PAYMENT'));await move(b,'RESERVED');await move(b,'CANCELLED');
+  await assert.rejects(move(b,'FULFILLED'));await assert.rejects(move(b,'AWAITING_PAYMENT'));
+  // An offer becomes a reservation together with its deadline (0007 ties the timestamps to the state).
+  await db.query(`UPDATE demo_orders SET state='RESERVED',reserved_until=now()+interval '5 minutes',allocated_at=now() WHERE id=$1`,[b]);await move(b,'CANCELLED');
   await move(b,'REVALIDATING');await move(b,'REFUND_PENDING');
   const c=await order(db,s.scenario);await move(c,'AWAITING_PAYMENT');await move(c,'RESERVED');await move(c,'CANCELLED');await assert.rejects(move(c,'EXPIRED'));
   await assert.rejects(db.query(`UPDATE demo_orders SET buyer_id='buyer-2' WHERE id=$1`,[c]));await assert.rejects(db.query(`UPDATE demo_orders SET quantity=5 WHERE id=$1`,[c]));

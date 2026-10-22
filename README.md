@@ -77,6 +77,15 @@ The browser API URL defaults to localhost:4000. For hosting, set `NEXT_PUBLIC_AP
 
 With `DEMO_MODE=true` the presenter (agent account) drives the simulated provider: `POST /api/v1/demo/orders/:id/simulate` with `outcome` one of `pending`, `success`, `failure`, `replay` (resend the last event byte-for-byte; the ledger does not change), `double_charge`, `late_success` or `refund`. Every outcome goes through the same signed-webhook handler a real provider would use. All money is integer paise; tax is a recorded zero demo rule. Nothing here is real settlement or a recognised credit. Details and failure handling: [docs/22](docs/22-demo-buyer-purchase.md).
 
+If applying a payment event keeps failing, the API logs the cause (error class and SQLSTATE, never the message) with the event id, and after `PAYMENT_MAX_EVENT_FAILURES` (8) attempts parks it as a dead letter: the provider is told it was received and stops retrying, nothing is applied, and `greenchain_payment_events_parked` turns non-zero. Fix the cause, then:
+
+```powershell
+npm run payments -w apps/api -- list
+npm run payments -w apps/api -- retry <eventId>
+```
+
+A successful retry applies the event and clears the dead letter in one transaction; a provider redelivery afterwards is an ordinary replay.
+
 The local demo creates `.local/buyer-password.txt` and `.local/payment-webhook-secret.txt` once and always runs with simulated payments on.
 
 In the web app, choose **Company buyer** at sign-in to get the marketplace: available supply by pseudonymous farmer group, an order form with an exact estimate, the reserved order with a countdown and a "why these credits" explanation, partial-fill offers, payment, and the purchased credit list or refund status. A browser holds one session at a time, so present it with two windows: the buyer in one, and the presenter (**Field agent / presenter**) in a private window, where the **Simulated payment provider** panel lists the scenario's orders and applies any provider outcome. The buyer's page refreshes by itself while a payment or refund is in progress. Ordering and payment are disabled while the device is offline; nothing is queued.

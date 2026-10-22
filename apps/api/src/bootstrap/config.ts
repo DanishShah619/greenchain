@@ -13,7 +13,9 @@ export function marketConfig(env:NodeJS.ProcessEnv=process.env):MarketRoutesConf
   if(demo!=='true'&&demo!=='false')throw new Error('DEMO_MODE must be true or false');
   const bps=env.DEMO_COMMISSION_BPS===undefined||env.DEMO_COMMISSION_BPS===''?DEFAULT_MARKET.commissionBps:Number(env.DEMO_COMMISSION_BPS);
   if(!Number.isInteger(bps)||bps<0||bps>10000)throw new Error('DEMO_COMMISSION_BPS must be an integer from 0 to 10000');
-  return {market:{...DEFAULT_MARKET,commissionBps:bps},payments:{...DEFAULT_PAYMENTS,secrets},demoMode:demo==='true'};
+  const failures=env.PAYMENT_MAX_EVENT_FAILURES===undefined||env.PAYMENT_MAX_EVENT_FAILURES===''?DEFAULT_PAYMENTS.maxEventFailures:Number(env.PAYMENT_MAX_EVENT_FAILURES);
+  if(!Number.isInteger(failures)||failures<1||failures>100)throw new Error('PAYMENT_MAX_EVENT_FAILURES must be an integer from 1 to 100');
+  return {market:{...DEFAULT_MARKET,commissionBps:bps},payments:{...DEFAULT_PAYMENTS,secrets,maxEventFailures:failures},demoMode:demo==='true'};
 }
 export function config() {
   const url=process.env.DATABASE_URL,origin=process.env.WEB_ORIGIN;

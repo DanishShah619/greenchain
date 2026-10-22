@@ -75,6 +75,7 @@ export async function marketSweep(db:Database,o:{config:SweepConfig;state:SweepS
     metrics.set('greenchain_refunds_pending',refunds.n);metrics.set('greenchain_refund_oldest_pending_age_seconds',Math.round(Number(refunds.oldest)));
     const events=new Map((await db.query('SELECT outcome,count(*)::int AS n FROM demo_payment_events GROUP BY outcome')).rows.map(r=>[r.outcome as string,r.n as number]));
     for(const outcome of PAYMENT_OUTCOMES)metrics.set('greenchain_payment_events',events.get(outcome)??0,{outcome});
+    metrics.set('greenchain_payment_events_parked',(await db.query('SELECT count(*)::int AS n FROM demo_payment_event_failures WHERE parked')).rows[0].n);
     metrics.set('greenchain_market_invariant_check_age_seconds',state.lastInvariantAt?Math.round((now()-state.lastInvariantAt)/1000):-1);
   }
   return result;
