@@ -1,6 +1,6 @@
 # Demo earnings, journal, payouts and statement
 
-Status: **Revision 2, signed off 2026-10-23. Build step 1 of §12 is implemented (migration `0008`, pure posting and state-machine logic); steps 2–6 are not.** Revision 2 folds in an independent design review; §14 lists what changed, §15 records decisions made while building. Scope: the demo subset of [11](11-reversal-reserve-design.md) (journal, lots, reserve funding) and [12](12-payouts-kyc-design.md) (batcher, payout state machine, sandbox rail), under [13](13-public-demo-plan.md): "simulated payout and statement", "payout simulation must resolve unknown outcomes by key before retrying", "statements expose gross, commission and net", "daily payout batching can use a protected demo clock". It builds on the buyer slice ([22](22-demo-buyer-purchase.md)), which writes one `demo_ledger_entries` row per credit sold. §10 lists every deviation from docs 11/12. Rigor: synthetic money, but the double-payout and conservation invariants apply in full.
+Status: **Revision 2, signed off 2026-10-23. Build steps 1–2 of §12 are implemented (schema and guards, pure domain, earnings at fulfilment with database parity, demo clock); steps 3–6 are not.** Revision 2 folds in an independent design review; §14 lists what changed, §15 records decisions made while building. Scope: the demo subset of [11](11-reversal-reserve-design.md) (journal, lots, reserve funding) and [12](12-payouts-kyc-design.md) (batcher, payout state machine, sandbox rail), under [13](13-public-demo-plan.md): "simulated payout and statement", "payout simulation must resolve unknown outcomes by key before retrying", "statements expose gross, commission and net", "daily payout batching can use a protected demo clock". It builds on the buyer slice ([22](22-demo-buyer-purchase.md)), which writes one `demo_ledger_entries` row per credit sold. §10 lists every deviation from docs 11/12. Rigor: synthetic money, but the double-payout and conservation invariants apply in full.
 
 ## 1. Goal and non-goals
 
@@ -60,7 +60,7 @@ Status: **Revision 2, signed off 2026-10-23. Build step 1 of §12 is implemented
 | `demo_payout_attempts` | `UNIQUE(payout_id, attempt_no)`; **UNIQUE (payout_id) WHERE outcome_at IS NULL**; set-once trigger. |
 | `demo_sandbox_rail`, `demo_sandbox_calls` | rail memory and call log (test oracle; not read by app code except through the port). |
 
-**Parity with the buyer slice:** `check_order_fulfilled()` (0005) is replaced to also require, per ledger row of the order, exactly one lot and one `EARN:` journal whose amounts match. This lands in migration `0009` with `postEarnings` (step 2): in step 1 nothing writes earnings yet, so the check would fail every sale. **Backfill**: 0008 creates payees, lots (`releasable_at_sim = earned_sim = created_at`, `holdback_days` 0, config version 0) and EARN/FUND journals for existing ledger rows, idempotently by journal key; payload hashes are built in SQL the same way as `payloadHash()` and a test compares them.
+**Parity with the buyer slice:** `check_order_fulfilled()` (0005) is replaced to also require, per ledger row of the order, exactly one lot and one `EARN:` journal whose amounts match. This landed in migration `0009` with `postEarnings` (step 2) as a deferred check per ledger row rather than per order (§15). **Backfill**: 0008 creates payees, lots (`releasable_at_sim = earned_sim = created_at`, `holdback_days` 0, config version 0) and EARN/FUND journals for existing ledger rows, idempotently by journal key; payload hashes are built in SQL the same way as `payloadHash()` and a test compares them.
 
 ## 6. Operations
 
@@ -151,7 +151,7 @@ PGlite for logic, constraints, crash points, every suffix (00, 02, 03, 04, 05, 0
 
 ## 12. Build sequence (each step green and committed)
 1. **Done.** Migration 0008 (tables, guards, backfill), config, pure domain (postings, state machine, backoff helpers extracted to the kernel) with constraint and golden tests.
-2. `postEarnings` from `fulfil()` (coordinate with any session editing `payments.ts`), migration 0009 (parity check), payees, clock, `simNow`.
+2. **Done.** `postEarnings` from `fulfil()`, migration 0009 (parity check), payees, clock, `simNow`.
 3. Batcher; pg races.
 4. Sandbox rail and its tables (`demo_sandbox_rail`, `demo_sandbox_calls`), send/resolve/settle/cancel, crash points; pg races.
 5. Routes, `requirePresenter` (also on the existing simulator routes), worker wiring, metrics, invariants.
@@ -185,3 +185,23 @@ Step 1 (2026-10-23):
   - The batch `run_date` must equal the IST date of `as_of_sim`.
   - Only the 2-character suffix of a payee token can change, and every change writes `demo_payee_token_history` from a trigger.
 - Attempt outcome classes: `ACCEPTED`, `SETTLED`, `TRANSIENT`, `REJECTED`, `RESOLVED_ABSENT`, `RESOLVED_FOUND`. Step 4 may extend the set with a migration.
+
+Step 2 (2026-10-23):
+- Parity is a deferred constraint trigger on each new `demo_ledger_entries` row, not a rewrite of `check_order_fulfilled()`. It also catches a row added later to an order that is already fulfilled. At commit the row needs:
+  - its order `FULFILLED`, with matching row count and gross;
+  - an `EARN:` journal whose hash equals the expected E1 for the row;
+  - a lot, with its EARNED event, exactly when net is positive;
+  - a `FUND:` journal equal to `half_even(c × basis)`, present exactly when the lot's reserve share is positive, with basis equal to the lot's `reserve_bps`.
+- `check_journal()` now also recomputes each journal's payload hash from its lines (`journal_payload_hash()`). A stored hash is therefore always a faithful fingerprint, and parity can compare hashes.
+- Order of work in `postEarnings`, after the credits (lock order step 5):
+  1. Create any missing payees.
+  2. Lock the payees in ascending order.
+  3. Read simulated time and the configuration in force at that simulated time. A version whose `effective_from` lies in the simulated future is not yet used.
+  4. Write journals and lots set-based (a few statements per sale, not per credit).
+  It is a no-op when replayed.
+- `postJournals` is idempotent by key. The same hash is skipped; a different hash, or another scenario, is refused with `JOURNAL_KEY_CONFLICT`.
+- `advanceClock` runs under the scenario lock, so a sale never sees the clock move mid-fulfilment. Errors:
+  - `VALIDATION_FAILED` (422): a step that is not 1 s–30 days;
+  - `CLOCK_CONFLICT` (409): stale `expectedOffsetSeconds`;
+  - `CLOCK_LIMIT` (409): beyond one year.
+- Not yet covered: the payee lock against a concurrent batch is proven only by the step 3 pg race (§7, "Batch vs fulfilment").

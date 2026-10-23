@@ -9,7 +9,7 @@ test('golden earnings (doc 11 worked example): E1 splits gross into payable and 
   const a=earningJournals({ledgerEntryId:'1',payeeGroupId:P,grossPaise:100030n,commissionPaise:5002n,netPaise:95028n,reserveBps:2000});
   assert.equal(a.earned.key,'EARN:1');assert.equal(a.earned.totalPaise,100030n);
   assert.deepEqual(a.earned.lines.map(l=>[l.account,l.side,l.amountPaise,l.payeeGroupId??null]),[['buyer_funds_clearing','DR',100030n,null],['payee_payable','CR',95028n,P],['commission_revenue','CR',5002n,null]]);
-  assert.equal(a.reservePaise,1000n,'5002 x 20% = 1000.4 -> 1000');assert.equal(a.funded?.key,'FUND:1');
+  assert.equal(a.reservePaise,1000n,'5002 x 20% = 1000.4 -> 1000');assert.equal(a.funded?.key,'FUND:1');assert.equal(a.funded?.basisBps,2000,'the reserve journal records its basis');assert.equal(a.earned.basisBps,undefined);
   assert.deepEqual(a.funded?.lines.map(l=>[l.account,l.side,l.amountPaise]),[['commission_revenue','DR',1000n],['reversal_reserve','CR',1000n]]);
   const b=earningJournals({ledgerEntryId:'2',payeeGroupId:P,grossPaise:100010n,commissionPaise:5000n,netPaise:95010n,reserveBps:2000});
   assert.equal(b.reservePaise,1000n);

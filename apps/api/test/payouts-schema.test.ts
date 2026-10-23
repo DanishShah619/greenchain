@@ -8,10 +8,12 @@ import {earningJournals,journal,payoutBatched,payoutSettled} from '../src/module
 import {canMovePayout,lotEventAllowed,PAYOUT_STATES,type LotState,type PayoutState} from '../src/modules/payouts/domain/state.js';
 import {seedMarket,PRICE} from './support/market.js';
 import {migratedPglite} from './support/pglite.js';
-import {addPayee,balance,migratedTo,sandboxToken,sellDirect,writeJournal} from './support/payouts.js';
+import {addBatch,addPayee,addPayout,balance,migratedTo,sandboxToken,sellDirect,writeJournal} from './support/payouts.js';
 // Database guards of the payout slice (docs/23 §5, migration 0008). They must hold even if application code is wrong.
+// They run on the schema as of 0008: from 0009 a ledger row commits only together with its earnings (payouts-earnings.test.ts),
+// which would stop these tests from writing the lots and journals they probe by hand.
 async function market(groups=2,perGroup=4){
-  const {db}=await migratedPglite();
+  const {db}=await migratedTo(8);
   const m=await seedMarket(db,{groups,perGroup});
   return {db,m,scenario:m.scenario};
 }
@@ -26,17 +28,7 @@ async function earnedLot(db:Database,scenario:string,group:{capture:string;credi
   await db.query(`INSERT INTO demo_lot_events(ledger_entry_id,seq,scenario_id,state,at_sim) VALUES ($1,1,$2,'EARNED',now())`,[l.id,scenario]);
   return l;
 }
-async function batch(db:Database,scenario:string,o:{runSeq?:number;requestId?:string|null;asOfSim?:string}={}){
-  const id=randomUUID(),runSeq=o.runSeq??0,requestId=o.requestId===undefined?(runSeq===0?null:randomUUID()):o.requestId,asOf=o.asOfSim??new Date().toISOString();
-  await db.query(`INSERT INTO demo_payout_batches(id,scenario_id,run_date,run_seq,request_id,as_of_sim,as_of_real,min_payout_paise,payout_limit_paise,config_version,status,created_by)
-    VALUES ($1,$2,($3::timestamptz AT TIME ZONE 'Asia/Kolkata')::date,$4,$5,$3,now(),10000,5000000,0,'RUNNING','worker')`,[id,scenario,asOf,runSeq,requestId]);
-  return id;
-}
-async function payout(db:Database,scenario:string,batchId:string,payee:string,amount=95028n){
-  const id=randomUUID();
-  await db.query(`INSERT INTO demo_payouts(id,batch_id,scenario_id,payee_group_id,account_token,gross_paise,amount_paise) VALUES ($1,$2,$3,$4,(SELECT account_token FROM demo_payees WHERE scenario_id=$3 AND payee_group_id=$4),$5,$5)`,[id,batchId,scenario,payee,String(amount)]);
-  return id;
-}
+const batch=addBatch,payout=addPayout;
 const move=(db:Database,id:string,state:string,extra='')=>db.query(`UPDATE demo_payouts SET state=$2${extra} WHERE id=$1`,[id,state]);
 
 test('half_even_bps in SQL agrees with the application helper, including exact ties',async()=>{

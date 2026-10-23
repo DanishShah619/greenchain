@@ -4,6 +4,7 @@ import {randomUUID} from 'node:crypto';
 import {migratedPglite} from './support/pglite.js';
 import {seedIssuedBatch} from './support/seed.js';
 import type {Database} from '../src/kernel/database.js';
+import {postEarnings} from '../src/modules/payouts/application/earnings.js';
 // Database-level rules of the buyer slice (docs/22 §5). These are the guarantees that must hold even if application code is wrong.
 const PRICE=100030n;
 async function base(credits=3){
@@ -22,7 +23,7 @@ async function order(db:Database,scenario:string,over:Record<string,any>={}){
 const hold=(db:Database,orderId:string,scenario:string,creditId:string,generation=1)=>db.query(`INSERT INTO demo_order_items(order_id,scenario_id,credit_id,group_id,generation,active) SELECT $1,$2,c.id,b.capture_id,$4,true FROM demo_credits c JOIN demo_issuance_batches b ON b.id=c.batch_id WHERE c.id=$3`,[orderId,scenario,creditId,generation]);
 const setCredit=(db:Database,creditId:string,state:string,orderId:string|null)=>db.query('UPDATE demo_credits SET state=$2,reserved_order_id=$3 WHERE id=$1',[creditId,state,orderId]);
 const attempt=async(db:Database,orderId:string,scenario:string,amount:bigint,state='PENDING')=>{const id=randomUUID();await db.query(`INSERT INTO demo_payment_attempts(id,order_id,scenario_id,provider,provider_ref,state,amount_paise) VALUES ($1,$2,$3,'simulator',$4,$5,$6)`,[id,orderId,scenario,`ref-${id}`,state,amount.toString()]);return id;};
-/** The fulfilment write set of docs/22 §6.1 step 4, in the documented order. */
+/** The fulfilment write set of docs/22 §6.1 step 4, in the documented order, with the earnings docs/23 §6.1 adds to it. */
 async function fulfil(tx:Database,s:Awaited<ReturnType<typeof base>>['s'],orderId:string,attemptId:string,credits:string[],opts:{skipLedger?:boolean;gross?:bigint;leaveUnsold?:boolean}={}){
   for(const [i,c] of credits.entries()){
     if(!(opts.leaveUnsold&&i===0))await setCredit(tx,c,'SOLD',orderId);
@@ -30,6 +31,8 @@ async function fulfil(tx:Database,s:Awaited<ReturnType<typeof base>>['s'],orderI
       const gross=opts.gross??PRICE;await tx.query(`INSERT INTO demo_ledger_entries(order_id,scenario_id,credit_id,payee_group_id,gross_paise,commission_paise,net_paise) VALUES ($1,$2,$3,(SELECT capture_id FROM demo_issuance_batches WHERE id=$4),$5,$6,$7)`,[orderId,s.scenario,c,s.batch,gross.toString(),'5002',(gross-5002n).toString()]);
     }
   }
+  const rows=(await tx.query(`SELECT id::text AS id,payee_group_id::text AS payee,gross_paise::text AS g,commission_paise::text AS c,net_paise::text AS n FROM demo_ledger_entries WHERE order_id=$1`,[orderId])).rows;
+  await postEarnings(tx,s.scenario,rows.map(r=>({ledgerEntryId:r.id,payeeGroupId:r.payee,grossPaise:BigInt(r.g),commissionPaise:BigInt(r.c),netPaise:BigInt(r.n)})));
   await tx.query(`UPDATE demo_payment_attempts SET state='SUCCEEDED' WHERE id=$1`,[attemptId]);
   await tx.query(`UPDATE demo_orders SET state='FULFILLED' WHERE id=$1`,[orderId]);
 }
@@ -134,12 +137,14 @@ test('fulfilment commits only when items, credits, ledger and totals agree',asyn
     assert.equal((await db.query('SELECT count(*)::int AS n FROM demo_ledger_entries')).rows[0].n,0,name);
   }
 });
-test('ledger rows balance, are one per credit, and are append-only',async()=>{
-  const {db,s}=await base();const o=await reserved(db,s,1);await db.query(`UPDATE demo_orders SET state='AWAITING_PAYMENT' WHERE id=$1`,[o]);await setCredit(db,s.creditIds[0],'SOLD',o);
+test('ledger rows balance, are one per credit, are append-only, and exist only through fulfilment',async()=>{
+  const {db,s}=await base();const o=await reserved(db,s,1),a=await attempt(db,o,s.scenario,PRICE);
+  await db.transaction(tx=>fulfil(tx,s,o,a,s.creditIds.slice(0,1)));
   const insert=(gross:string,commission:string,net:string,credit=s.creditIds[0])=>db.query(`INSERT INTO demo_ledger_entries(order_id,scenario_id,credit_id,payee_group_id,gross_paise,commission_paise,net_paise) VALUES ($1,$2,$3,$4,$5,$6,$7)`,[o,s.scenario,credit,s.capture,gross,commission,net]);
-  await assert.rejects(insert('100030','5002','95027'));await assert.rejects(insert('-1','0','-1'));
-  await insert('100030','5002','95028');
-  await assert.rejects(insert('100030','5002','95028'),'a credit is posted once');
+  await assert.rejects(insert('100030','5002','95027',s.creditIds[1]));await assert.rejects(insert('-1','0','-1',s.creditIds[1]));
+  await assert.rejects(insert('100030','5002','95028'),/unique|duplicate/,'a credit is posted once');
+  // 0009: a row outside fulfilment breaks its order's totals and has no earnings, so it never commits.
+  await assert.rejects(insert('100030','5002','95028',s.creditIds[1]),/order|EARN/);
   await assert.rejects(db.query('UPDATE demo_ledger_entries SET net_paise=0'));await assert.rejects(db.query('DELETE FROM demo_ledger_entries'));
 });
 test('payment events and refunds: idempotency key, fixed outcomes, append-only, refund once per kind',async()=>{

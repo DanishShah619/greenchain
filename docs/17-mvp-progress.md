@@ -105,7 +105,17 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
   - a backfill of earlier sales into payees, lots and EARN/FUND journals.
 - Validation: tests were written first and seen to fail. 148 PGlite tests and 17 real-PostgreSQL tests pass. The database payout transitions are compared pair by pair with the application table. The backfilled payload hashes equal the application's.
 - Mutation check: 20 guards were each broken in turn; every one turned a test red.
-- Nothing writes earnings yet. `postEarnings`, and the parity check that makes it mandatory at fulfilment (migration `0009`), are step 2.
+- Step 2: every sale now posts its earnings in the fulfilment transaction (`postEarnings`):
+  - one earnings journal and one reserve journal per credit, written set-based;
+  - a lot with its EARNED event;
+  - synthetic payees, locked in ascending order;
+  - holdback for payees never paid before, measured in simulated time;
+  - the configuration in force at simulated time.
+- Migration `0009` makes those earnings mandatory. A ledger row commits only with matching earnings and a fulfilled order. Each journal's payload hash is rechecked against its lines.
+- The presenter's demo clock moves by compare-and-set, forward only, at most 30 days per step and one year in total.
+- Step 2 validation: 156 PGlite tests and 17 real-PostgreSQL tests pass. 13 mutations (parity rules, holdback, simulated time, config selection, journal replay, clock) were each caught.
+- Not yet tested: the payee lock against a concurrent batch. That race is part of step 3.
+- Live smoke deferred to step 5, when routes and the worker exist.
 
 ## Remaining release work
 

@@ -4,6 +4,7 @@ import {WorkflowError,safeErrorFields} from '../../../kernel/errors.js';
 import {appendAudit} from '../../audit/application/audit.js';
 import type {Actor} from '../../capture/application/capture.js';
 import {ledgerLine} from '../domain/money.js';
+import {postEarnings} from '../../payouts/application/earnings.js';
 import {withScenarioLock} from './lock.js';
 import {DEFAULT_MARKET,orderAnchor,orderView,ownedOrder,reapExpired,requireBuyer,snapshotHash,systemActor,type MarketConfig,type OrderView} from './orders.js';
 /**
@@ -99,12 +100,16 @@ async function refund(tx:Database,l:Locked,kind:'LATE_UNFILLABLE'|'DUPLICATE_ATT
   await tx.query(`INSERT INTO demo_payment_refunds(order_id,attempt_id,scenario_id,kind,amount_paise) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (attempt_id,kind) DO NOTHING`,[l.order.id,l.attempt.id,l.order.scenario_id,kind,String(amount)]);
 }
 const succeed=(tx:Database,attemptId:string,mismatch=false)=>tx.query(`UPDATE demo_payment_attempts SET state='SUCCEEDED',mismatch=$2 WHERE id=$1 AND state<>'SUCCEEDED'`,[attemptId,mismatch]);
-/** Credits SOLD, one ledger line each, group waiting reset, attempt SUCCEEDED, order FULFILLED (docs/22 §6.1 step 4). */
+/**
+ * Credits SOLD, one ledger line each with its earnings (docs/23 §6.1: journals, lots, payee locks), group waiting reset,
+ * attempt SUCCEEDED, order FULFILLED (docs/22 §6.1 step 4).
+ */
 async function fulfil(tx:Database,l:Locked,creditIds:string[],groups:string[],asOf:Date){
   const unitPrice=money(l.order.unit_price_paise),line=ledgerLine(unitPrice,l.order.commission_bps);
   await tx.query(`UPDATE demo_credits SET state='SOLD' WHERE id=ANY($1::text[])`,[creditIds]);
-  await tx.query(`INSERT INTO demo_ledger_entries(order_id,scenario_id,credit_id,payee_group_id,gross_paise,commission_paise,net_paise) SELECT $1,$2,x.c,x.g,$5,$6,$7 FROM unnest($3::text[],$4::uuid[]) AS x(c,g)`,
-    [l.order.id,l.order.scenario_id,creditIds,groups,String(line.gross),String(line.commission),String(line.net)]);
+  const ledger=(await tx.query(`INSERT INTO demo_ledger_entries(order_id,scenario_id,credit_id,payee_group_id,gross_paise,commission_paise,net_paise) SELECT $1,$2,x.c,x.g,$5,$6,$7 FROM unnest($3::text[],$4::uuid[]) AS x(c,g)
+    RETURNING id::text AS id,payee_group_id::text AS payee`,[l.order.id,l.order.scenario_id,creditIds,groups,String(line.gross),String(line.commission),String(line.net)])).rows;
+  await postEarnings(tx,l.order.scenario_id,ledger.map(r=>({ledgerEntryId:r.id as string,payeeGroupId:r.payee as string,grossPaise:line.gross,commissionPaise:line.commission,netPaise:line.net})));
   await tx.query(`INSERT INTO demo_group_state(scenario_id,group_id,last_allocated_at) SELECT $1,g,$3 FROM unnest($2::uuid[]) AS g ON CONFLICT (scenario_id,group_id) DO UPDATE SET last_allocated_at=EXCLUDED.last_allocated_at`,
     [l.order.scenario_id,[...new Set(groups)],asOf]);
   await succeed(tx,l.attempt.id);

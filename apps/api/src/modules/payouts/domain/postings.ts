@@ -8,7 +8,8 @@ import {commissionPaise} from '../../market/domain/money.js';
 export type Account='buyer_funds_clearing'|'payee_payable'|'commission_revenue'|'reversal_reserve'|'payout_clearing'|'bank_cash';
 export type JournalKind='EARNED'|'RESERVE_FUNDED'|'PAYOUT_BATCHED'|'PAYOUT_SETTLED'|'PAYOUT_REVERSED';
 export type Line={account:Account;side:'DR'|'CR';amountPaise:bigint;payeeGroupId?:string};
-export type JournalSpec={kind:JournalKind;key:string;lines:Line[];totalPaise:bigint;payloadHash:string};
+/** basisBps is set on RESERVE_FUNDED only: the reserve share it was computed with, stored so invariants can recompute it. */
+export type JournalSpec={kind:JournalKind;key:string;lines:Line[];totalPaise:bigint;payloadHash:string;basisBps?:number};
 /** A stable fingerprint of what a journal says, so a repeated idempotency key with different content is detected. */
 export function payloadHash(kind:JournalKind,lines:readonly Line[]):string{
   const body=lines.map(l=>`${l.account}:${l.payeeGroupId??''}:${l.side}:${l.amountPaise}`).join(';');
@@ -36,7 +37,7 @@ export function earningJournals(e:EarningInput):{earned:JournalSpec;funded:Journ
   const funded=journal('RESERVE_FUNDED',`FUND:${e.ledgerEntryId}`,[
     {account:'commission_revenue',side:'DR',amountPaise:reservePaise},
     {account:'reversal_reserve',side:'CR',amountPaise:reservePaise}]);
-  return {earned,funded,reservePaise};
+  return {earned,funded:funded&&{...funded,basisBps:e.reserveBps},reservePaise};
 }
 const positive=(amount:bigint)=>{if(amount<=0n)throw new Error('a payout amount must be positive');return amount;};
 /** E12: the payout leaves the payee's payable balance into clearing until the rail settles it. */
