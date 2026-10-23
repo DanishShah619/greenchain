@@ -1,6 +1,6 @@
 # Demo earnings, journal, payouts and statement
 
-Status: **Revision 2, proposed, awaiting sign-off (2026-10-23). Nothing in this document is implemented.** Revision 2 folds in an independent design review; §14 lists what changed. Scope: the demo subset of [11](11-reversal-reserve-design.md) (journal, lots, reserve funding) and [12](12-payouts-kyc-design.md) (batcher, payout state machine, sandbox rail), under [13](13-public-demo-plan.md): "simulated payout and statement", "payout simulation must resolve unknown outcomes by key before retrying", "statements expose gross, commission and net", "daily payout batching can use a protected demo clock". It builds on the buyer slice ([22](22-demo-buyer-purchase.md)), which writes one `demo_ledger_entries` row per credit sold. §10 lists every deviation from docs 11/12. Rigor: synthetic money, but the double-payout and conservation invariants apply in full.
+Status: **Revision 2, signed off 2026-10-23. Build step 1 of §12 is implemented (migration `0008`, pure posting and state-machine logic); steps 2–6 are not.** Revision 2 folds in an independent design review; §14 lists what changed, §15 records decisions made while building. Scope: the demo subset of [11](11-reversal-reserve-design.md) (journal, lots, reserve funding) and [12](12-payouts-kyc-design.md) (batcher, payout state machine, sandbox rail), under [13](13-public-demo-plan.md): "simulated payout and statement", "payout simulation must resolve unknown outcomes by key before retrying", "statements expose gross, commission and net", "daily payout batching can use a protected demo clock". It builds on the buyer slice ([22](22-demo-buyer-purchase.md)), which writes one `demo_ledger_entries` row per credit sold. §10 lists every deviation from docs 11/12. Rigor: synthetic money, but the double-payout and conservation invariants apply in full.
 
 ## 1. Goal and non-goals
 
@@ -60,7 +60,7 @@ Status: **Revision 2, proposed, awaiting sign-off (2026-10-23). Nothing in this 
 | `demo_payout_attempts` | `UNIQUE(payout_id, attempt_no)`; **UNIQUE (payout_id) WHERE outcome_at IS NULL**; set-once trigger. |
 | `demo_sandbox_rail`, `demo_sandbox_calls` | rail memory and call log (test oracle; not read by app code except through the port). |
 
-**Parity with the buyer slice:** `check_order_fulfilled()` (0005) is replaced to also require, per ledger row of the order, exactly one lot and one `EARN:` journal whose amounts match. **Backfill**: 0008 creates payees, lots (`releasable_at_sim = created_at`, config version 0) and EARN/FUND journals for existing ledger rows, idempotently by journal key.
+**Parity with the buyer slice:** `check_order_fulfilled()` (0005) is replaced to also require, per ledger row of the order, exactly one lot and one `EARN:` journal whose amounts match. This lands in migration `0009` with `postEarnings` (step 2): in step 1 nothing writes earnings yet, so the check would fail every sale. **Backfill**: 0008 creates payees, lots (`releasable_at_sim = earned_sim = created_at`, `holdback_days` 0, config version 0) and EARN/FUND journals for existing ledger rows, idempotently by journal key; payload hashes are built in SQL the same way as `payloadHash()` and a test compares them.
 
 ## 6. Operations
 
@@ -150,10 +150,10 @@ Test-only oracle: each SETTLED payout has exactly one processed transfer at the 
 PGlite for logic, constraints, crash points, every suffix (00, 02, 03, 04, 05, 06, 10, 11, 12), golden postings (doc 11 lines 100030/100010 plus half-even ties at 1250 and 5000 bps), clock behaviour, backfill and parity, authorization and privacy, invariants after each scenario, audit chain. Real PostgreSQL for the races in §7, each mutation-checked. Live smoke with API and worker: sell, advance past holdback, batch, settle, statement reconciles; logs read for errors and secrets.
 
 ## 12. Build sequence (each step green and committed)
-1. Migration 0008 (tables, guards, parity check, backfill), config, pure domain (postings, state machine, backoff helpers extracted to the kernel) with constraint and golden tests.
-2. `postEarnings` from `fulfil()` (coordinate with any session editing `payments.ts`), payees, clock, `simNow`.
+1. **Done.** Migration 0008 (tables, guards, backfill), config, pure domain (postings, state machine, backoff helpers extracted to the kernel) with constraint and golden tests.
+2. `postEarnings` from `fulfil()` (coordinate with any session editing `payments.ts`), migration 0009 (parity check), payees, clock, `simNow`.
 3. Batcher; pg races.
-4. Sandbox rail, send/resolve/settle/cancel, crash points; pg races.
+4. Sandbox rail and its tables (`demo_sandbox_rail`, `demo_sandbox_calls`), send/resolve/settle/cancel, crash points; pg races.
 5. Routes, `requirePresenter` (also on the existing simulator routes), worker wiring, metrics, invariants.
 6. Web: statement on the agent's case view; presenter payout panel.
 
@@ -166,3 +166,22 @@ PGlite for logic, constraints, crash points, every suffix (00, 02, 03, 04, 05, 0
 
 ## 14. What revision 2 changed (from the design review)
 Critical: a resolver could resend while a sender was still in flight (real-time lease, one open attempt per payout, set-once outcome); cancel relied on NOT_FOUND alone, so a late-processing rail could pay twice (idempotency window, `non_payment_confirmed`, `voidKey`, suffix 11); the demo clock mixed time domains (holdback was nullified after a jump; named `*_sim`/`*_real` columns); daily-batch uniqueness blocked legitimate runs and `requestId` was not stored (`run_seq`, `request_id`, resume); payee state was mutable while payouts did not snapshot the token, and a rejected payee looped (token snapshot, `reverify_required` on reject). High/medium: complete lock order with timeouts; journal trigger covered neither empty journals nor later lines; zero-amount postings could fail a sale; invariants 4 and 6 were wrong or vacuous, conservation was missing, the scheduled check was not a snapshot; no backfill or DB-level parity with existing ledger rows; any agent could act as presenter and verifiers could see statements; the INDETERMINATE loop had no cap; the rail's amount was not checked; config could not be read where needed (now per-scenario data).
+
+## 15. Decisions made while building
+Step 1 (2026-10-23):
+- The parity check moved from 0008 to 0009, and the sandbox rail tables to build step 4. Each lands with the code that needs it.
+- A payout with `non_payment_confirmed` can never become `SENT` or `SETTLED`. This is enforced in both the domain table and the database, and it matches the `CHECK` in §5.
+- `voidKey` returning VOIDED is what confirms non-payment before a cancel. ALREADY_PROCESSED leaves the flag unset.
+- Database guards added beyond §5:
+  - Each journal kind may only use its own accounts and sides (E1, E2, E12, E13, E14).
+  - The idempotency key is derived from the kind and the reference (a `CHECK`).
+  - `RESERVE_FUNDED` records its `basis_bps`, so invariant 6 can recompute zero-net sales that have no lot.
+  - A lot must copy its ledger row's payee and net.
+  - `releasable_at_sim` is either `earned_sim` or `earned_sim + holdback_days`.
+  - A lot event must agree with the payout it names: `IN_BATCH` needs an active item, `PAID` needs `SETTLED`, `RELEASED` needs `CANCELLED`/`RETURNED`. Payout rows are therefore updated before the lot events that follow from them.
+  - Items are added only while the payout is `PENDING`, only for the payout's own payee, and released only with a cancelled or returned payout.
+  - A payout's token must be the payee's current token when the payout is built.
+  - Attempts are numbered from 1 without gaps.
+  - The batch `run_date` must equal the IST date of `as_of_sim`.
+  - Only the 2-character suffix of a payee token can change, and every change writes `demo_payee_token_history` from a trigger.
+- Attempt outcome classes: `ACCEPTED`, `SETTLED`, `TRANSIENT`, `REJECTED`, `RESOLVED_ABSENT`, `RESOLVED_FOUND`. Step 4 may extend the set with a migration.

@@ -32,7 +32,7 @@ Last updated: 2026-10-14 · Version: docs v2 (draft) · Maintainer: project team
 | 23 | [docs/19-demo-calculations.md](docs/19-demo-calculations.md) | Versioned synthetic scenarios, fixed-scale trace, immutable results and scope gates | Demo calculations implemented |
 | 24 | [docs/20-demo-review-issuance.md](docs/20-demo-review-issuance.md) | Exact calculation basis, independent review and transactional demo credits/buffer/carry | Demo issuance implemented |
 | 25 | [docs/22-demo-buyer-purchase.md](docs/22-demo-buyer-purchase.md) | Buyer slice: marketplace, FCAE v0 reservation, simulated payment, fulfilment, failure modes and test plan | Implemented (all six build steps); real-phone checks deferred |
-| 26 | [docs/23-demo-earnings-payouts.md](docs/23-demo-earnings-payouts.md) | Earnings journal, lots, holdback, payout batcher, sandbox rail, statement and demo clock | Spec revision 2 (design-reviewed); awaiting sign-off |
+| 26 | [docs/23-demo-earnings-payouts.md](docs/23-demo-earnings-payouts.md) | Earnings journal, lots, holdback, payout batcher, sandbox rail, statement and demo clock | Revision 2 signed off; build step 1 of 6 implemented (migration 0008, domain) |
 
 Application setup and local preview commands: [README.md](README.md).
 

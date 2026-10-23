@@ -1,3 +1,4 @@
+import {backoffSeconds,withDeadline as kernelDeadline} from '../../../kernel/retry.js';
 /** Tunable behaviour of the proof worker. Defaults suit the Amoy testnet demo; all values are validated at startup. */
 export type ChainPolicy={
   /** Consecutive failures before a proof that never produced a transaction is parked as FAILED (needs an operator to requeue). */
@@ -38,9 +39,7 @@ export function policyFromEnvironment(env:NodeJS.ProcessEnv=process.env):ChainPo
  * workers or proofs do not retry in lock-step. `random` is injectable for deterministic tests.
  */
 export function retryDelaySeconds(failureCount:number,policy:ChainPolicy,random:()=>number=Math.random):number{
-  const attempt=Math.max(1,Math.floor(failureCount));
-  const exponential=Math.min(policy.maxDelaySeconds,policy.baseDelaySeconds*2**Math.min(attempt-1,20));
-  return Math.round(exponential*(0.8+0.4*random()));
+  return backoffSeconds(failureCount,policy.baseDelaySeconds,policy.maxDelaySeconds,random);
 }
 /** Safe, bounded-cardinality error codes. Anything not recognised becomes CHAIN_UNKNOWN; raw messages are never kept. */
 const OWN_CODES=new Set(['CHAIN_NETWORK_MISMATCH','CHAIN_CONTRACT_MISMATCH','CHAIN_WRITER_MISMATCH','CHAIN_GAS_LIMIT','CHAIN_FEE_LIMIT','CHAIN_PREPARED_TRANSACTION_MISMATCH','CHAIN_ORIGINAL_TRANSACTION_REQUIRED','CHAIN_LEASE_LOST','CHAIN_CYCLE_TIMEOUT']);
@@ -60,8 +59,4 @@ export function classifyChainError(error:unknown,depth=0):string{
   return 'CHAIN_UNKNOWN';
 }
 /** Bounds one chain-port call. The underlying work cannot be cancelled, so callers must treat the outcome as unknown and re-inspect. */
-export function withDeadline<T>(work:Promise<T>,ms:number):Promise<T>{
-  let timer:ReturnType<typeof setTimeout>|undefined;
-  const timeout=new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('CHAIN_CYCLE_TIMEOUT')),ms);});
-  return Promise.race([work,timeout]).finally(()=>clearTimeout(timer));
-}
+export function withDeadline<T>(work:Promise<T>,ms:number):Promise<T>{return kernelDeadline(work,ms,'CHAIN_CYCLE_TIMEOUT');}
