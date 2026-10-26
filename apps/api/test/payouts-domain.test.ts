@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {earningJournals,journal,payoutBatched,payoutReversed,payoutSettled,payloadHash} from '../src/modules/payouts/domain/postings.js';
 import {canMovePayout,lotEventAllowed,PAYOUT_STATES,FINAL_PAYOUT_STATES} from '../src/modules/payouts/domain/state.js';
 import {backoffSeconds,withDeadline} from '../src/kernel/retry.js';
+import {selectLots} from '../src/modules/payouts/domain/batch.js';
 const P='11111111-1111-4111-8111-111111111111';
 const sum=(lines:{side:string;amountPaise:bigint}[],side:string)=>lines.filter(l=>l.side===side).reduce((n,l)=>n+l.amountPaise,0n);
 test('golden earnings (doc 11 worked example): E1 splits gross into payable and commission; E2 funds the reserve half-even',()=>{
@@ -67,4 +68,13 @@ test('kernel backoff and deadline are generic (the chain worker keeps its behavi
   assert.equal(backoffSeconds(1,5,3600,()=>0),4);assert.equal(backoffSeconds(1,5,3600,()=>1),6);
   await assert.rejects(withDeadline(new Promise(()=>{}),20,'PAYOUT_CALL_TIMEOUT'),/PAYOUT_CALL_TIMEOUT/);
   assert.equal(await withDeadline(Promise.resolve(7),50,'X'),7);
+});
+test('lot selection: oldest first up to the limit; a lot above the limit is skipped and reported, later lots still go',()=>{
+  const lots=(...nets:number[])=>nets.map((n,i)=>({id:String(i+1),netPaise:BigInt(n)}));
+  assert.deepEqual(selectLots(lots(100,200,300),1000n),{taken:['1','2','3'],totalPaise:600n,oversized:[]});
+  assert.deepEqual(selectLots(lots(400,700,100),1000n),{taken:['1'],totalPaise:400n,oversized:[]},'stops at the first lot that no longer fits: the younger 100 does not overtake the older 700');
+  assert.deepEqual(selectLots(lots(1500,400,2000,500),1000n),{taken:['2','4'],totalPaise:900n,oversized:['1','3']});
+  assert.deepEqual(selectLots(lots(1000),1000n),{taken:['1'],totalPaise:1000n,oversized:[]},'exactly the limit fits');
+  assert.deepEqual(selectLots([],1000n),{taken:[],totalPaise:0n,oversized:[]});
+  assert.throws(()=>selectLots(lots(1),0n));
 });

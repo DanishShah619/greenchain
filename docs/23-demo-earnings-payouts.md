@@ -1,6 +1,6 @@
 # Demo earnings, journal, payouts and statement
 
-Status: **Revision 2, signed off 2026-10-23. Build steps 1–2 of §12 are implemented (schema and guards, pure domain, earnings at fulfilment with database parity, demo clock); steps 3–6 are not.** Revision 2 folds in an independent design review; §14 lists what changed, §15 records decisions made while building. Scope: the demo subset of [11](11-reversal-reserve-design.md) (journal, lots, reserve funding) and [12](12-payouts-kyc-design.md) (batcher, payout state machine, sandbox rail), under [13](13-public-demo-plan.md): "simulated payout and statement", "payout simulation must resolve unknown outcomes by key before retrying", "statements expose gross, commission and net", "daily payout batching can use a protected demo clock". It builds on the buyer slice ([22](22-demo-buyer-purchase.md)), which writes one `demo_ledger_entries` row per credit sold. §10 lists every deviation from docs 11/12. Rigor: synthetic money, but the double-payout and conservation invariants apply in full.
+Status: **Revision 2, signed off 2026-10-23. Build steps 1–3 of §12 are implemented (schema and guards, pure domain, earnings at fulfilment with database parity, demo clock, batcher); steps 4–6 are not.** Revision 2 folds in an independent design review; §14 lists what changed, §15 records decisions made while building. Scope: the demo subset of [11](11-reversal-reserve-design.md) (journal, lots, reserve funding) and [12](12-payouts-kyc-design.md) (batcher, payout state machine, sandbox rail), under [13](13-public-demo-plan.md): "simulated payout and statement", "payout simulation must resolve unknown outcomes by key before retrying", "statements expose gross, commission and net", "daily payout batching can use a protected demo clock". It builds on the buyer slice ([22](22-demo-buyer-purchase.md)), which writes one `demo_ledger_entries` row per credit sold. §10 lists every deviation from docs 11/12. Rigor: synthetic money, but the double-payout and conservation invariants apply in full.
 
 ## 1. Goal and non-goals
 
@@ -152,7 +152,7 @@ PGlite for logic, constraints, crash points, every suffix (00, 02, 03, 04, 05, 0
 ## 12. Build sequence (each step green and committed)
 1. **Done.** Migration 0008 (tables, guards, backfill), config, pure domain (postings, state machine, backoff helpers extracted to the kernel) with constraint and golden tests.
 2. **Done.** `postEarnings` from `fulfil()`, migration 0009 (parity check), payees, clock, `simNow`.
-3. Batcher; pg races.
+3. **Done.** Batcher; pg races.
 4. Sandbox rail and its tables (`demo_sandbox_rail`, `demo_sandbox_calls`), send/resolve/settle/cancel, crash points; pg races.
 5. Routes, `requirePresenter` (also on the existing simulator routes), worker wiring, metrics, invariants.
 6. Web: statement on the agent's case view; presenter payout panel.
@@ -204,4 +204,23 @@ Step 2 (2026-10-23):
   - `VALIDATION_FAILED` (422): a step that is not 1 s–30 days;
   - `CLOCK_CONFLICT` (409): stale `expectedOffsetSeconds`;
   - `CLOCK_LIMIT` (409): beyond one year.
-- Not yet covered: the payee lock against a concurrent batch is proven only by the step 3 pg race (§7, "Batch vs fulfilment").
+- The payee lock taken by fulfilment is not proven by any test yet (corrected in step 3, below).
+
+Step 3 (2026-10-26):
+- Lot selection (`selectLots`): oldest first. A lot above the limit is skipped, counted, and flagged on the payout as `OVERSIZED_LOT_SKIPPED`. Otherwise selection stops at the first lot that no longer fits, so a younger lot never overtakes an older one.
+- Eligibility comes from the batch's own snapshot: `as_of_sim`, minimum and limit. A resumed run therefore makes the same decisions as the first.
+- One transaction per payee, under the payee lock with `lock_timeout = 3s`. Write order:
+  1. the payout (`PENDING`, token snapshot);
+  2. its items;
+  3. the `IN_BATCH` events;
+  4. E12.
+  A payee that already has a payout in the batch is left alone. A payee that fails leaves the batch `PARTIAL`, for the worker to resume. A completed batch is never downgraded.
+- Presenter batch creation is serialised per scenario by a transaction-scoped advisory lock. The lock covers `run_seq` = max + 1 for the simulated day, and replay by request id.
+- The scheduled run (`run_seq` 0) is created once per simulated IST day whether or not anything is releasable. "Last batch age" alerts only when candidates exist (§9).
+- Not yet built: rollover and oversized counts are only returned in the batch summary. Metrics and logs arrive with the worker wiring in step 5.
+- Real-PostgreSQL races, each mutation-checked:
+  - the scheduled run and two presenter runs over the same payees;
+  - batches racing sales for one payee;
+  - concurrent presenter requests with the same and with different request ids.
+  Removing the batcher's payee lock fails two races. Removing the batch-creation lock fails all three.
+- Correction to step 2: removing the payee lock from fulfilment fails no race. A batch reads a payee's lots under its own lock, so a concurrent sale lands in this batch or the next either way. Fulfilment's lock exists for the holdback decision ("no SETTLED payout") against a concurrent settlement, and for the §6 lock order. Step 4's settle race is where it can be shown to matter. Until then it is kept but unproven.

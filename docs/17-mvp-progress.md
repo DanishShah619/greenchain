@@ -116,6 +116,15 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
 - Step 2 validation: 156 PGlite tests and 17 real-PostgreSQL tests pass. 13 mutations (parity rules, holdback, simulated time, config selection, journal replay, clock) were each caught.
 - Not yet tested: the payee lock against a concurrent batch. That race is part of step 3.
 - Live smoke deferred to step 5, when routes and the worker exist.
+- Step 3: the batcher.
+  - Releasable lots are taken oldest first up to the limit. A lot above the limit is skipped and flagged. Totals below the minimum roll over to the next batch.
+  - One payout per payee per batch: the payout (with its token snapshot), its items, `IN_BATCH` events and E12, in a short transaction under that payee's lock.
+  - The worker makes one scheduled run per simulated day and resumes interrupted batches. Presenter runs are replayed by request id.
+- Step 3 validation:
+  - 164 PGlite and 20 real-PostgreSQL tests pass.
+  - 9 batch-rule mutations are caught. Two were first missed because of test gaps, which were then closed.
+  - Removing the batcher's payee lock or the batch-creation lock fails the new races.
+  - Removing fulfilment's payee lock fails nothing yet; it should be testable against settlement in step 4.
 
 ## Remaining release work
 

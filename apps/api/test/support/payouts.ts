@@ -7,7 +7,10 @@ import type {Database} from '../../src/kernel/database.js';
 import {defaultMigrationsDir,loadMigrations,migrate} from '../../src/kernel/migrate.js';
 import type {JournalSpec} from '../../src/modules/payouts/domain/postings.js';
 import {pgliteDatabase} from './pglite.js';
-import {PRICE} from './market.js';
+import {buyer,PRICE} from './market.js';
+import {createOrder,DEFAULT_MARKET,type MarketConfig} from '../../src/modules/market/application/orders.js';
+import {DEFAULT_PAYMENTS,handlePaymentEvent,startPaymentAttempt,type PaymentConfig} from '../../src/modules/market/application/payments.js';
+import {eventBody,signedDelivery} from '../../src/modules/market/infrastructure/simulator.js';
 /** A PGlite database migrated only up to `version`, so data can be written the way an older release wrote it (backfill tests). */
 export async function migratedTo(version:number){
   const dir=mkdtempSync(join(tmpdir(),'greenchain-upto-')),source=fileURLToPath(defaultMigrationsDir);
@@ -75,4 +78,20 @@ export async function addPayout(db:Database,scenario:string,batchId:string,payee
   const id=randomUUID();
   await db.query(`INSERT INTO demo_payouts(id,batch_id,scenario_id,payee_group_id,account_token,gross_paise,amount_paise) VALUES ($1,$2,$3,$4,(SELECT account_token FROM demo_payees WHERE scenario_id=$3 AND payee_group_id=$4),$5,$5)`,[id,batchId,scenario,payee,String(amount)]);
   return id;
+}
+const WEBHOOK:PaymentConfig={...DEFAULT_PAYMENTS,secrets:['payout-tests-webhook-secret']};
+/** A real sale: order, payment attempt, signed provider success through the webhook handler. Returns the order id. */
+export async function sellViaWebhook(db:Database,o:{buyerId:string;quantity?:number;market?:MarketConfig;scenario?:string}){
+  const b=buyer(o.buyerId,o.scenario),quantity=o.quantity??1,market=o.market??DEFAULT_MARKET;
+  const v=await createOrder(db,b,{requestId:randomUUID(),quantity},market);
+  const paying=await startPaymentAttempt(db,b,v.order.id,{acceptSnapshotHash:v.snapshotHash},market);
+  const body=eventBody({id:`evt_${randomUUID()}`,type:'payment.succeeded',providerRef:paying.providerRef,amountPaise:PRICE*BigInt(quantity),currency:'INR'});
+  const r=await handlePaymentEvent(db,signedDelivery(WEBHOOK,body),WEBHOOK);
+  if(r.outcome!=='FULFILLED')throw new Error(`sale not fulfilled: ${JSON.stringify(r)}`);
+  return v.order.id;
+}
+/** A ledger config version effective an hour ago (simulated), defaults otherwise. */
+export async function setLedgerConfig(db:Database,scenario:string,version:number,o:{holdbackDays?:number;reserveBps?:number;minPaise?:bigint;limitPaise?:bigint}={}){
+  await db.query(`INSERT INTO demo_ledger_config(scenario_id,version,holdback_days,reserve_bps,min_payout_paise,payout_limit_paise,backoff_base_seconds,idempotency_window_seconds,effective_from,created_by)
+    VALUES ($1,$2,$3,$4,$5,$6,5,86400,now()-interval '1 hour','presenter')`,[scenario,version,o.holdbackDays??7,o.reserveBps??2000,String(o.minPaise??10000n),String(o.limitPaise??5000000n)]);
 }
