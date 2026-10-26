@@ -125,6 +125,15 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
   - 9 batch-rule mutations are caught. Two were first missed because of test gaps, which were then closed.
   - Removing the batcher's payee lock or the batch-creation lock fails the new races.
   - Removing fulfilment's payee lock fails nothing yet; it should be testable against settlement in step 4.
+- Step 4: a deterministic sandbox rail (migration `0010`) with send, resolve by key, settle, return and cancel.
+  - No lock is held across a rail call. Claims are fenced by a real-time lease.
+  - Unknown outcomes are resolved by key before any resend, with at most six attempts.
+  - A cancel needs confirmed non-payment (`voidKey`) or a passed idempotency window. If the rail says the money already went, the payout follows the rail instead.
+- Step 4 validation:
+  - 185 PGlite and 23 real-PostgreSQL tests pass.
+  - Every sandbox behaviour (00, 02, 03, 04, 05, 06, 10, 11, 12) and the crash points are covered, each followed by a books-and-rail check.
+  - Removing the lease check, the send-time re-check, the outcome fence, or fulfilment's payee lock (now proven by a settle race) fails a test, as do 12 settlement-rule mutations.
+  - Two of those were first missed (the outcome fence and the past-window rule); tests were added for both.
 
 ## Remaining release work
 

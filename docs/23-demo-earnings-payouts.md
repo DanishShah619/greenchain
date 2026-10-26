@@ -1,6 +1,6 @@
 # Demo earnings, journal, payouts and statement
 
-Status: **Revision 2, signed off 2026-10-23. Build steps 1–3 of §12 are implemented (schema and guards, pure domain, earnings at fulfilment with database parity, demo clock, batcher); steps 4–6 are not.** Revision 2 folds in an independent design review; §14 lists what changed, §15 records decisions made while building. Scope: the demo subset of [11](11-reversal-reserve-design.md) (journal, lots, reserve funding) and [12](12-payouts-kyc-design.md) (batcher, payout state machine, sandbox rail), under [13](13-public-demo-plan.md): "simulated payout and statement", "payout simulation must resolve unknown outcomes by key before retrying", "statements expose gross, commission and net", "daily payout batching can use a protected demo clock". It builds on the buyer slice ([22](22-demo-buyer-purchase.md)), which writes one `demo_ledger_entries` row per credit sold. §10 lists every deviation from docs 11/12. Rigor: synthetic money, but the double-payout and conservation invariants apply in full.
+Status: **Revision 2, signed off 2026-10-23. Build steps 1–4 of §12 are implemented (schema and guards, pure domain, earnings at fulfilment with database parity, demo clock, batcher, sandbox rail and settlement); steps 5–6 (routes, worker wiring, metrics, invariants, web) are not.** Revision 2 folds in an independent design review; §14 lists what changed, §15 records decisions made while building. Scope: the demo subset of [11](11-reversal-reserve-design.md) (journal, lots, reserve funding) and [12](12-payouts-kyc-design.md) (batcher, payout state machine, sandbox rail), under [13](13-public-demo-plan.md): "simulated payout and statement", "payout simulation must resolve unknown outcomes by key before retrying", "statements expose gross, commission and net", "daily payout batching can use a protected demo clock". It builds on the buyer slice ([22](22-demo-buyer-purchase.md)), which writes one `demo_ledger_entries` row per credit sold. §10 lists every deviation from docs 11/12. Rigor: synthetic money, but the double-payout and conservation invariants apply in full.
 
 ## 1. Goal and non-goals
 
@@ -153,7 +153,7 @@ PGlite for logic, constraints, crash points, every suffix (00, 02, 03, 04, 05, 0
 1. **Done.** Migration 0008 (tables, guards, backfill), config, pure domain (postings, state machine, backoff helpers extracted to the kernel) with constraint and golden tests.
 2. **Done.** `postEarnings` from `fulfil()`, migration 0009 (parity check), payees, clock, `simNow`.
 3. **Done.** Batcher; pg races.
-4. Sandbox rail and its tables (`demo_sandbox_rail`, `demo_sandbox_calls`), send/resolve/settle/cancel, crash points; pg races.
+4. **Done.** Sandbox rail and its tables (`demo_sandbox_rail`, `demo_sandbox_calls`, migration 0010), send/resolve/settle/cancel, crash points; pg races.
 5. Routes, `requirePresenter` (also on the existing simulator routes), worker wiring, metrics, invariants.
 6. Web: statement on the agent's case view; presenter payout panel.
 
@@ -223,4 +223,39 @@ Step 3 (2026-10-26):
   - batches racing sales for one payee;
   - concurrent presenter requests with the same and with different request ids.
   Removing the batcher's payee lock fails two races. Removing the batch-creation lock fails all three.
-- Correction to step 2: removing the payee lock from fulfilment fails no race. A batch reads a payee's lots under its own lock, so a concurrent sale lands in this batch or the next either way. Fulfilment's lock exists for the holdback decision ("no SETTLED payout") against a concurrent settlement, and for the §6 lock order. Step 4's settle race is where it can be shown to matter. Until then it is kept but unproven.
+- Correction to step 2: removing the payee lock from fulfilment fails no race. A batch reads a payee's lots under its own lock, so a concurrent sale lands in this batch or the next either way. Fulfilment's lock exists for the holdback decision ("no SETTLED payout") against a concurrent settlement, and for the §6 lock order. Step 4's settle race is where it can be shown to matter. Until then it is kept but unproven. (Proven in step 4.)
+
+Step 4 (2026-10-26):
+- Rail port (`domain/rail.ts`): `send`, `getByKey`, `voidKey`, and a sandbox-only `tick`. The payout id is the key. Any error from a call is an unknown outcome, never a failure.
+- Sandbox rail behaviour beyond P9:
+  - It stores every key it sees.
+  - A resend under the same key is the same transfer. Accepting that resend makes a late (11) transfer visible.
+  - A void of an unknown key records it as `VOIDED`, so a later send is refused.
+  - `getByKey` reports `REJECTED` and `VOIDED` as found, and both mean definitively unpaid.
+- Sending:
+  1. The claim transaction opens the attempt and sets a real-time lease (deadline 10 s + 15 s).
+  2. The rail is called with no lock held.
+  3. The outcome transaction is fenced by the exact lease value and attempt number. An answer from a sender whose lease a resolver has taken over is ignored (`STALE`).
+- Retries and resolution:
+  - An unknown outcome waits one backoff interval (simulated time) before the first lookup.
+  - Resolvers take their own lease, so two never overlap.
+  - `UNRESOLVED` payouts are polled hourly in simulated time.
+- Exhausting six attempts leads to `NEEDS_REVIEW` with flag `ATTEMPTS_EXHAUSTED`, not confirmed unpaid. It can be cancelled only after the window, through `voidKey`.
+- Cancel is allowed only from `NEEDS_REVIEW`/`UNRESOLVED`, and only when non-payment is confirmed or the idempotency window has passed. Otherwise it fails with `PAYOUT_MAY_BE_PAID` (409).
+  - `VOIDED` confirms non-payment and cancels.
+  - `ALREADY_PROCESSED` makes the payout follow the rail, and the cancel fails with `PAYOUT_PROCESSED` (409).
+  - A rail that cannot answer gives `RAIL_UNAVAILABLE` (503).
+  - A repeated cancel of a cancelled payout is a replay.
+- Anomalies go to review with a flag:
+  - `AMOUNT_MISMATCH` (no E13);
+  - `SENT_NOT_FOUND`;
+  - `RAIL_KEY_CONFLICT` (attempt class `CONFLICT`, added in 0010);
+  - `PROCESSED_AFTER_CONFIRMATION`: the rail reports money moved after non-payment was confirmed. The `CHECK` forbids `SENT`/`SETTLED` with that flag, so the payout stays for review.
+- `settlePayout` is the only path for E13 and PAID lots. A return or cancel posts E14, releases the items, then marks the lots `RELEASED`. Rejects and returns set `reverify_required`.
+- Not yet built: auditing of the presenter's cancel arrives with the routes in step 5.
+- Tests:
+  - every suffix, the crash points, a 30-day clock jump, and a suffix change mid-retry, each with a books check (invariants 5 and 7 and the rail oracle);
+  - real-PostgreSQL races: a stalled sender against resolvers, six concurrent senders, and a sale racing the settlement of its payee's first payout.
+- Mutation checks, each caught:
+  - removing the lease check, the send-time state re-check, fulfilment's payee lock, or the outcome fence;
+  - 12 settlement-rule mutations.
