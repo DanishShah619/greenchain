@@ -1,6 +1,6 @@
 # Demo earnings, journal, payouts and statement
 
-Status: **Revision 2, signed off 2026-10-23. Build steps 1–5 of §12 are implemented (schema and guards, pure domain, earnings at fulfilment with database parity, demo clock, batcher, sandbox rail and settlement, routes, presenter guard, worker wiring, metrics, invariants); step 6 (web) is not.** Revision 2 folds in an independent design review; §14 lists what changed, §15 records decisions made while building. Scope: the demo subset of [11](11-reversal-reserve-design.md) (journal, lots, reserve funding) and [12](12-payouts-kyc-design.md) (batcher, payout state machine, sandbox rail), under [13](13-public-demo-plan.md): "simulated payout and statement", "payout simulation must resolve unknown outcomes by key before retrying", "statements expose gross, commission and net", "daily payout batching can use a protected demo clock". It builds on the buyer slice ([22](22-demo-buyer-purchase.md)), which writes one `demo_ledger_entries` row per credit sold. §10 lists every deviation from docs 11/12. Rigor: synthetic money, but the double-payout and conservation invariants apply in full.
+Status: **Revision 2, signed off 2026-10-23. All six build steps of §12 are implemented: schema and guards, pure domain, earnings at fulfilment with database parity, demo clock, batcher, sandbox rail and settlement, routes, presenter guard, worker wiring, metrics, invariants, and the web statement and presenter panel.** Revision 2 folds in an independent design review; §14 lists what changed, §15 records decisions made while building. Scope: the demo subset of [11](11-reversal-reserve-design.md) (journal, lots, reserve funding) and [12](12-payouts-kyc-design.md) (batcher, payout state machine, sandbox rail), under [13](13-public-demo-plan.md): "simulated payout and statement", "payout simulation must resolve unknown outcomes by key before retrying", "statements expose gross, commission and net", "daily payout batching can use a protected demo clock". It builds on the buyer slice ([22](22-demo-buyer-purchase.md)), which writes one `demo_ledger_entries` row per credit sold. §10 lists every deviation from docs 11/12. Rigor: synthetic money, but the double-payout and conservation invariants apply in full.
 
 ## 1. Goal and non-goals
 
@@ -155,7 +155,7 @@ PGlite for logic, constraints, crash points, every suffix (00, 02, 03, 04, 05, 0
 3. **Done.** Batcher; pg races.
 4. **Done.** Sandbox rail and its tables (`demo_sandbox_rail`, `demo_sandbox_calls`, migration 0010), send/resolve/settle/cancel, crash points; pg races.
 5. **Done.** Routes, `requirePresenter` (also on the existing simulator routes), worker wiring, metrics, invariants.
-6. Web: statement on the agent's case view; presenter payout panel.
+6. **Done.** Web: statement on the agent's case view; presenter payout panel.
 
 ## 13. Open questions (defaults apply unless changed)
 1. Synthetic pre-verified payees, real KYC deferred (P2).
@@ -299,3 +299,32 @@ Step 5 (2026-10-27):
   - 196 PGlite and 23 real-PostgreSQL tests pass.
   - The §11 live smoke passed: sale, holdback, clock, batch, worker send and settle, clean invariants, and logs free of errors and secrets.
 - A date-dependent test bug was found: three settlement tests relied on the scheduled run, which happens once per simulated IST day, so they passed or failed by the time of day. They now use explicit presenter runs.
+
+Step 6 (2026-10-27):
+- Web (`apps/web`):
+  - `EarningsStatement` sits on the agent's case view, beside the calculation panel. It shows what the credits sold for, the commission, what the group earned, what has been paid out and what is still owed. It also shows the reserve share, explained as coming from the commission and never from the farmer group. Per credit, it says where the money is, with the holdback date for held lots. It hides itself when the case has no review record.
+  - `PresenterPayoutPanel` sits beside the simulated payment provider and has:
+    - clock steps of +1, +7 and +30 days (compare-and-set);
+    - a run-payouts button, whose request id is kept until the run succeeds;
+    - a per-group table with the not-yet-paid, held and paid amounts, a re-verify flag, and a simulated-bank selector;
+    - payouts with their state, attempts and flags in words, and a cancel form that requires a reason;
+    - a payout-rules form, entered in rupees and percent and converted to paise and basis points exactly;
+    - the recent runs.
+    It refreshes itself while payouts are in flight, and hides for anyone who is not the presenter.
+- Helpers in `src/payouts.ts` (16 web tests): exact money and percent parsing, state labels, the clock label, suffix choices, the run summary, and error messages.
+- Browser check (built PWA, live API and worker, throwaway database):
+  - A buyer purchase of 20 credits was paid by the presenter through the simulator.
+  - The presenter's own case showed one credit: ₹1,000.30 sold, ₹50.02 commission, ₹950.28 earned, ₹10.00 reserve share, "Held until 3 Nov 2026".
+  - After +7 days the worker's daily run paid all 20 groups, and the statement showed the credit paid.
+  - A group set to bank behaviour 05 was rejected. The panel then offered a cancel; cancelling with a reason left it "Cancelled (not paid)", flagged for re-verification, with its earnings payable again.
+  - At 375 px the page does not overflow (wide tables scroll inside their own box).
+  - API and worker logs: 228 lines, all info, no warnings, errors, passwords or tokens.
+- Found while checking:
+  - A presenter run straight after a clock jump can find nothing, because the worker's daily run paid first. The run summary now says so instead of a bare "0 payouts".
+  - The payout panel does not refresh when a sale is simulated in the panel beside it; use its Refresh button.
+  - A pre-existing weakness, now fixed: one panel that received unexpected data blanked the whole page, because there was no error boundary (seen with seeded test data).
+    - Every workspace panel now sits inside its own `PanelBoundary` (Next's `catchError`). The fallback names the panel, uses `role="alert"`, and offers "Try again" (`reset`). It never shows or logs the error.
+    - `DemoCalculationPanel` renders whatever part of a calculation result is present.
+    - Checked in a browser: a malformed result no longer blanks the page, and a forced failure in the payout panel replaced only that panel, which recovered on "Try again".
+    - React itself still logs caught errors to the browser console.
+- Build: `next build` stops on every other run at a Next.js 16.4.0 security advisory, and a retry continues. Patch releases 16.4.1–16.4.3 exist. Upgrading is a separate dependency decision for the owner.

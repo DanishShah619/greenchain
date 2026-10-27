@@ -96,7 +96,7 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
 - A backend audit (2026-10-22) ranked five issues; all are fixed. Migration `0007` freezes evidence uploads, chunks and the plot once a case leaves DRAFT (the basis of review and issuance), enforces the review-case state machine in the database, ties an order's reservation timestamps to its state so no reservation can become unreapable, and adds indexes for the market's hot paths (credits by holding order, refunds by order and pending-by-scenario, payment events by attempt, stale offers). Payment events whose apply keeps failing now report their cause in logs and are parked as dead letters after a bound, with an operator retry.
 - Tests were written first and seen to fail; the concurrent dead-letter race on real PostgreSQL and the guard tests pass, and an existing test that tampered with an approved plot now asserts that the database refuses it (the application's own staleness check is still exercised by bypassing the guard for that one write).
 
-## Earnings and payout slice (in progress)
+## Earnings and payout slice
 
 - Spec: [document 23](23-demo-earnings-payouts.md), revision 2, design-reviewed and signed off 2026-10-23. Build step 1 of 6 is implemented:
   - pure posting rules (E1, E2, E12–E14, with zero lines skipped) and the payout and lot state machines;
@@ -151,6 +151,15 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
     - worker metrics showed 2 settled, clearing 0 and reserve 2,000 paise;
     - API, worker and setup logs had no errors or warnings, and no generated secret or sandbox token;
     - the database was dropped afterwards.
+- Step 6: the earnings statement on the agent's case view, and the presenter's payout panel in the PWA. The panel has the clock, payout runs, per-group simulated bank, cancel with a reason, and payout rules.
+- Step 6 validation:
+  - 16 web tests pass, the web typecheck is clean, and the static build passes. Every other build run stops at a Next.js advisory first and continues on retry; an upgrade is pending the owner's decision.
+  - Browser check against a live API and worker:
+    - sale, holdback date, clock jump, the worker paying, and the statement showing the credit paid;
+    - a rejected payout cancelled through the form;
+    - no overflow at 375 px;
+    - clean logs.
+- Each workspace panel now has its own error boundary, so one failing panel no longer blanks the page. A source test guards the wrapping, and it was checked in a browser.
 
 ## Remaining release work
 
