@@ -1,6 +1,6 @@
 # Demo earnings, journal, payouts and statement
 
-Status: **Revision 2, signed off 2026-10-23. Build steps 1–4 of §12 are implemented (schema and guards, pure domain, earnings at fulfilment with database parity, demo clock, batcher, sandbox rail and settlement); steps 5–6 (routes, worker wiring, metrics, invariants, web) are not.** Revision 2 folds in an independent design review; §14 lists what changed, §15 records decisions made while building. Scope: the demo subset of [11](11-reversal-reserve-design.md) (journal, lots, reserve funding) and [12](12-payouts-kyc-design.md) (batcher, payout state machine, sandbox rail), under [13](13-public-demo-plan.md): "simulated payout and statement", "payout simulation must resolve unknown outcomes by key before retrying", "statements expose gross, commission and net", "daily payout batching can use a protected demo clock". It builds on the buyer slice ([22](22-demo-buyer-purchase.md)), which writes one `demo_ledger_entries` row per credit sold. §10 lists every deviation from docs 11/12. Rigor: synthetic money, but the double-payout and conservation invariants apply in full.
+Status: **Revision 2, signed off 2026-10-23. Build steps 1–5 of §12 are implemented (schema and guards, pure domain, earnings at fulfilment with database parity, demo clock, batcher, sandbox rail and settlement, routes, presenter guard, worker wiring, metrics, invariants); step 6 (web) is not.** Revision 2 folds in an independent design review; §14 lists what changed, §15 records decisions made while building. Scope: the demo subset of [11](11-reversal-reserve-design.md) (journal, lots, reserve funding) and [12](12-payouts-kyc-design.md) (batcher, payout state machine, sandbox rail), under [13](13-public-demo-plan.md): "simulated payout and statement", "payout simulation must resolve unknown outcomes by key before retrying", "statements expose gross, commission and net", "daily payout batching can use a protected demo clock". It builds on the buyer slice ([22](22-demo-buyer-purchase.md)), which writes one `demo_ledger_entries` row per credit sold. §10 lists every deviation from docs 11/12. Rigor: synthetic money, but the double-payout and conservation invariants apply in full.
 
 ## 1. Goal and non-goals
 
@@ -154,7 +154,7 @@ PGlite for logic, constraints, crash points, every suffix (00, 02, 03, 04, 05, 0
 2. **Done.** `postEarnings` from `fulfil()`, migration 0009 (parity check), payees, clock, `simNow`.
 3. **Done.** Batcher; pg races.
 4. **Done.** Sandbox rail and its tables (`demo_sandbox_rail`, `demo_sandbox_calls`, migration 0010), send/resolve/settle/cancel, crash points; pg races.
-5. Routes, `requirePresenter` (also on the existing simulator routes), worker wiring, metrics, invariants.
+5. **Done.** Routes, `requirePresenter` (also on the existing simulator routes), worker wiring, metrics, invariants.
 6. Web: statement on the agent's case view; presenter payout panel.
 
 ## 13. Open questions (defaults apply unless changed)
@@ -259,3 +259,43 @@ Step 4 (2026-10-26):
 - Mutation checks, each caught:
   - removing the lease check, the send-time state re-check, fulfilment's payee lock, or the outcome fence;
   - 12 settlement-rule mutations.
+
+Step 5 (2026-10-27):
+- `requirePresenter` (`kernel/presenter.ts`) checks:
+  - demo mode is on;
+  - role `agent`;
+  - the id is on `DEMO_PRESENTER_IDS` (default `presenter`);
+  - the scenario is not `showcase`;
+  - the scenario is a demo namespace.
+  It guards every payout control and the existing simulator routes (`/demo/orders`, `/demo/invariants`, `/demo/orders/:id/simulate`). Ordinary agents can no longer simulate payments.
+- Deviations from §6.4:
+  - Payee labels reuse the buyer slice's `Group XXXXXX` label: an unkeyed SHA-256 of the random case id, not the keyed HMAC of P1. The same group therefore has the same label for buyers and the presenter.
+  - The suffix route takes the 6-character code: `POST /demo/payees/:code/sandbox`.
+- Presenter writes are audited in the same transaction as the change, and need CSRF. Audit events require a capture anchor:
+  - payee actions (suffix, cancel) anchor to the payee's own case;
+  - scenario-wide actions (clock, config, batch) anchor to the scenario's first capture.
+  The cancel is refused (404) for a payout outside the presenter's scenario.
+- `PUT /demo/ledger-config` adds version max + 1 under the scenario lock, effective from simulated now. A minimum above the limit is `VALIDATION_FAILED`.
+- The presenter batch route creates a run, then runs it, and reports the batch summary. A repeated request id replays the batch and pays nothing new.
+- Statement (`GET /cases/:id/statement`):
+  - Access: the owning agent only. Other agents get 404 (as for every case route), verifiers and buyers 403.
+  - Each line gives credit id, gross, commission, net, reserve share, and a state: `HELD`, `RELEASABLE`, `IN_PAYOUT`, `PAID`, or `NO_NET` for a 100%-commission sale. It also gives `releasableAt`.
+  - It also shows payouts by state and amount, the payable balance, and totals.
+  - It contains no case, order or buyer ids, tokens, rail references, labels or villages; a test scans for them. The presenter panel shows labels and token suffixes only.
+- Invariants (`assertPayoutInvariants`):
+  - nine codes for the eight invariants of §8 (invariant 4 has two);
+  - each scenario is checked in one `REPEATABLE READ READ ONLY` transaction;
+  - refs are journal, ledger or payout ids, or payee labels, never a case id.
+  They appear in the presenter invariant report as `payoutViolations`, and in the worker gauge `greenchain_ledger_invariant_violations`.
+- Worker:
+  - In demo mode each cycle runs batches and the settlement cycle per demo scenario. Each scenario is isolated, and so is the step as a whole (`greenchain_payout_sweep_failures_total`). Payout work makes the cycle busy.
+  - Metrics are those of §9: payouts by state; attention counts and oldest ages; oldest `SENT`; rollovers; lag; `payout_clearing`; reserve; invariant gauge; last batch age.
+  - Logs carry the payout id, payee label, from/to state, attempt and outcome. They never carry the token or the case id, and error messages are never logged.
+- Mutation checks:
+  - The first mutation run was cut short by the end of a session. Its later "survivors" were empty runs, so the reruns record pass/fail counts.
+  - Three real survivors were then closed by new tests: an allow-listed verifier is refused by role; the guard refuses without demo mode; a presenter cannot cancel another scenario's payout.
+  - All 11 now fail a test.
+- Validation:
+  - 196 PGlite and 23 real-PostgreSQL tests pass.
+  - The §11 live smoke passed: sale, holdback, clock, batch, worker send and settle, clean invariants, and logs free of errors and secrets.
+- A date-dependent test bug was found: three settlement tests relied on the scheduled run, which happens once per simulated IST day, so they passed or failed by the time of day. They now use explicit presenter runs.

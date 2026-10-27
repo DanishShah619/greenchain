@@ -39,7 +39,7 @@ export async function ensureScheduledBatch(db:Database,scenarioId:string):Promis
   });
 }
 /** A presenter run for the current simulated day; the same request id always returns the same batch. */
-export async function createPresenterBatch(db:Database,scenarioId:string,input:{requestId:string;actorId:string}):Promise<{batchId:string;runSeq:number;runDate:string;replayed:boolean}>{
+export async function createPresenterBatch(db:Database,scenarioId:string,input:{requestId:string;actorId:string},audit?:(tx:Database,batchId:string)=>Promise<unknown>):Promise<{batchId:string;runSeq:number;runDate:string;replayed:boolean}>{
   if(typeof input.requestId!=='string'||!UUID.test(input.requestId))throw new WorkflowError('VALIDATION_FAILED',422);
   return db.transaction(async tx=>{
     await lockBatchCreation(tx,scenarioId);
@@ -47,6 +47,7 @@ export async function createPresenterBatch(db:Database,scenarioId:string,input:{
     if(existing)return {batchId:existing.id,runSeq:existing.run_seq,runDate:existing.run_date,replayed:true};
     const created=await insertBatch(tx,scenarioId,null,input.requestId,input.actorId);
     if(!created)throw new WorkflowError('BATCH_CONFLICT',409);
+    await audit?.(tx,created.id);
     return {batchId:created.id,runSeq:created.run_seq,runDate:created.run_date,replayed:false};
   });
 }

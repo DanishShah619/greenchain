@@ -7,6 +7,7 @@ import type {ChainPort} from '../../chain/application/port.js';
 import {proofStats,runChainCycle,type CycleOptions} from '../../chain/application/worker.js';
 import {declareMarketWorkerMetrics} from '../../market/application/metrics.js';
 import {marketSweep,type SweepConfig,type SweepResult,type SweepState} from '../../market/application/sweep.js';
+import {declarePayoutWorkerMetrics,payoutSweep,type PayoutSweepDeps} from '../../payouts/application/sweep.js';
 export const PROOF_STATUSES=['QUEUED','PREPARED','PENDING','RECONCILING','CONFIRMED','FAILED'] as const;
 /** Everything the worker exports. Label values come from fixed sets (result, status, error code), so cardinality is bounded. */
 export function declareWorkerMetrics(metrics:Metrics){
@@ -25,12 +26,14 @@ export function declareWorkerMetrics(metrics:Metrics){
     .declare('greenchain_audit_full_verifications_total','counter','Full audit verifications by result.')
     .declare('greenchain_jobs_pending','gauge','Capture jobs not yet processed.');
   declareMarketWorkerMetrics(metrics);
+  declarePayoutWorkerMetrics(metrics);
 }
 export type HealthState={name:string;startedAt:number;lastSuccessAt:number|null;lastResult:string|null;lastErrorCode:string|null;consecutiveFailures:number;integrityFailed:boolean;nextFullVerifyAt:number};
 export const newHealthState=(name:string,now=Date.now()):HealthState=>({name,startedAt:now,lastSuccessAt:null,lastResult:null,lastErrorCode:null,consecutiveFailures:0,integrityFailed:false,nextFullVerifyAt:0});
 export type WorkerDeps={db:Database;chain?:ChainPort;log:Logger;metrics:Metrics;health:HealthState;now?:()=>number;
   /** Full audit re-verification interval; 0 disables it. */fullVerifyEveryMs?:number;cycle?:CycleOptions;
-  /** The buyer-market sweep (docs/22 §6.2); omitted means no market step. */market?:{config:SweepConfig;state:SweepState}};
+  /** The buyer-market sweep (docs/22 §6.2); omitted means no market step. */market?:{config:SweepConfig;state:SweepState};
+  /** The payout step (docs/23 §6.2-6.3); omitted means no payouts (demo mode only). */payouts?:PayoutSweepDeps};
 export type CycleOutcome={ok:boolean;idle:boolean;result:string;errorCode?:string};
 const IDLE_RESULTS=new Set(['IDLE','NOT_CONFIGURED','BUSY','HALTED_INTEGRITY']);
 const errorCodeOf=(error:unknown)=>error instanceof WorkflowError?error.code:safeErrorFields(error).errorCode??'UNKNOWN';
@@ -68,6 +71,12 @@ export async function workerCycle(deps:WorkerDeps):Promise<CycleOutcome>{
       try{market=await marketSweep(db,{config:deps.market.config,state:deps.market.state,metrics,log,now});}
       catch(error){metrics.inc('greenchain_market_sweep_failures_total');log.error({code:errorCodeOf(error),...safeErrorFields(error)},'Market sweep failed');}
     }
+    // The payout step is isolated the same way (and each scenario inside it is isolated too).
+    let payouts=false;
+    if(deps.payouts){
+      try{payouts=(await payoutSweep(db,{...deps.payouts,metrics,log,now})).worked;}
+      catch(error){metrics.inc('greenchain_payout_sweep_failures_total');log.error({code:errorCodeOf(error),...safeErrorFields(error)},'Payout step failed');}
+    }
     let integrity=await auditIntegrity(db);
     const everyMs=deps.fullVerifyEveryMs??0;
     const lastFull=integrity.fullVerifiedAt?Date.parse(integrity.fullVerifiedAt):0;
@@ -100,7 +109,7 @@ export async function workerCycle(deps:WorkerDeps):Promise<CycleOutcome>{
     metrics.set('greenchain_worker_last_success_timestamp_seconds',Math.floor(now()/1000));
     metrics.set('greenchain_worker_consecutive_failures',0);
     await heartbeat(db,health,true);
-    const idle=!(cycle.audit?.processed)&&jobs===0&&IDLE_RESULTS.has(cycle.proof)&&!market?.worked;
+    const idle=!(cycle.audit?.processed)&&jobs===0&&IDLE_RESULTS.has(cycle.proof)&&!market?.worked&&!payouts;
     log[idle?'debug':'info']({proof:cycle.proof,chained:cycle.audit?.processed??0,jobs},'Worker cycle');
     return {ok:true,idle,result:cycle.proof};
   }catch(error){

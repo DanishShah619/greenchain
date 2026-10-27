@@ -7,12 +7,16 @@ import {handlePaymentEvent,startPaymentAttempt,type PaymentConfig} from '../appl
 import {SIMULATED_OUTCOMES,presenterInvariantReport,presenterOrders,simulate,type SimulatedOutcome} from '../infrastructure/simulator.js';
 import {WorkflowError} from '../../../kernel/errors.js';
 import type {Metrics} from '../../../kernel/metrics.js';
+import {requirePresenter,type PresenterPolicy} from '../../../kernel/presenter.js';
+import {SHOWCASE_MARKET} from '../application/seed.js';
 export type MarketRoutesConfig={market:MarketConfig;payments:PaymentConfig;demoMode:boolean;webhookRatePerMinute?:number;
+  /** Accounts allowed to use presenter controls (docs/23 P11); defaults to the seeded `presenter`. */presenterIds?:string[];
   /** Optional; declare with declareMarketApiMetrics. */metrics?:Metrics};
 export const WEBHOOK_PATH='/api/v1/payments/webhooks/simulator';
 type ResolveActor=(request:FastifyRequest,write?:boolean)=>Promise<Actor>;
 const uuid={type:'string',format:'uuid'} as const;
 const idParams={type:'object',additionalProperties:false,required:['id'],properties:{id:uuid}} as const;
+export const presenterPolicy=(config:MarketRoutesConfig):PresenterPolicy=>({demoMode:config.demoMode,presenterIds:config.presenterIds??['presenter'],publicScenarioId:SHOWCASE_MARKET.scenarioId});
 export async function registerMarketRoutes(app:FastifyInstance,db:Database,actor:ResolveActor,config:MarketRoutesConfig){
   const metrics=config.metrics;
   app.get('/api/v1/market/inventory',async request=>inventory(db,await actor(request)));
@@ -61,13 +65,15 @@ export async function registerMarketRoutes(app:FastifyInstance,db:Database,actor
       });
     });
   }
-  // Presenter controls for the simulated provider. Only in demo mode; absent (404) otherwise.
+  // Presenter controls for the simulated provider. Only in demo mode; absent (404) otherwise. Only the allow-listed presenter.
   if(config.demoMode&&config.payments.secrets.length){
-    app.get('/api/v1/demo/orders',async request=>presenterOrders(db,await actor(request)));
-    app.get('/api/v1/demo/invariants',async request=>presenterInvariantReport(db,await actor(request)));
+    const policy=presenterPolicy(config);
+    const presenter=async(request:FastifyRequest,write=false)=>{const who=await actor(request,write);await requirePresenter(db,who,policy);return who;};
+    app.get('/api/v1/demo/orders',async request=>presenterOrders(db,await presenter(request)));
+    app.get('/api/v1/demo/invariants',async request=>presenterInvariantReport(db,await presenter(request)));
     app.post<{Params:{id:string};Body:{outcome:SimulatedOutcome}}>('/api/v1/demo/orders/:id/simulate',{schema:{params:idParams,body:{type:'object',additionalProperties:false,
       required:['outcome'],properties:{outcome:{enum:[...SIMULATED_OUTCOMES]}}}}},async(request,reply)=>{
-      const result=await simulate(db,await actor(request,true),request.params.id,request.body.outcome,config.payments);
+      const result=await simulate(db,await presenter(request,true),request.params.id,request.body.outcome,config.payments);
       // Simulated deliveries call the handler in-process, so count them here; they never pass through the webhook route.
       if('outcome' in result&&result.outcome)metrics?.inc('greenchain_payment_events_applied_total',{outcome:result.outcome});
       else if(result.status>=500)metrics?.inc('greenchain_payment_event_failures_total',{code:('code' in result&&result.code)||'UNKNOWN'});

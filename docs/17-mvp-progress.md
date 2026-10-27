@@ -134,6 +134,23 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
   - Every sandbox behaviour (00, 02, 03, 04, 05, 06, 10, 11, 12) and the crash points are covered, each followed by a books-and-rail check.
   - Removing the lease check, the send-time re-check, the outcome fence, or fulfilment's payee lock (now proven by a settle race) fails a test, as do 12 settlement-rule mutations.
   - Two of those were first missed (the outcome fence and the past-window rule); tests were added for both.
+- Step 5: payout routes and worker wiring.
+  - The owner-only earnings statement.
+  - Presenter controls: clock, batch, ledger config, sandbox suffix, cancel. All are audited and CSRF-protected, behind a shared presenter guard that now also protects the payment simulator (allow-list `DEMO_PRESENTER_IDS`).
+  - The eight ledger invariants, run as a read-only snapshot per scenario.
+  - The worker's payout step: demo mode only, isolated, with metrics and transition logs that carry no tokens or case ids.
+- Step 5 validation:
+  - 196 PGlite tests pass.
+  - All 11 guard mutations (presenter guard, statement ownership, CSRF, audit, scenario scoping, re-verification) fail a test.
+  - 23 real-PostgreSQL tests pass.
+  - Live smoke (2026-10-27) against a throwaway database, with the real API and worker:
+    - a 2-credit sale, held 7 days;
+    - a clock jump and a presenter batch (2 payouts);
+    - the worker sent and settled both;
+    - the invariant report was clean for the market and the ledger;
+    - worker metrics showed 2 settled, clearing 0 and reserve 2,000 paise;
+    - API, worker and setup logs had no errors or warnings, and no generated secret or sandbox token;
+    - the database was dropped afterwards.
 
 ## Remaining release work
 

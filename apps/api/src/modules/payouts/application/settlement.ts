@@ -1,4 +1,6 @@
 import type {Database} from '../../../kernel/database.js';
+import type {Logger} from '../../../kernel/logger.js';
+import {groupLabel} from '../../market/application/orders.js';
 import {WorkflowError} from '../../../kernel/errors.js';
 import {backoffSeconds,withDeadline} from '../../../kernel/retry.js';
 import {payoutReversed,payoutSettled} from '../domain/postings.js';
@@ -17,7 +19,10 @@ import {postJournals} from './journal.js';
  * Every transaction here takes the payee lock, then the payout row (lock order steps 5, 6), with a 3 s lock timeout.
  */
 export const MAX_ATTEMPTS=6,BACKOFF_CAP_SECONDS=3600,UNRESOLVED_AFTER_SECONDS=86400;
-export type SettlementOptions={rail:PayoutRail;deadlineMs?:number;leaseSeconds?:number;random?:()=>number;limit?:number;onError?:(error:unknown)=>void};
+export type SettlementOptions={rail:PayoutRail;deadlineMs?:number;leaseSeconds?:number;random?:()=>number;limit?:number;onError?:(error:unknown)=>void;log?:Logger};
+type Transition={payoutId:string;payee:string;from:string;to:string;attempt:number;outcome:string};
+/** Logs a state change by payout id and payee label, never the token or the payee (case) id (docs/23 §9). */
+const logTransition=(log:Logger|undefined,t:Transition|undefined)=>{if(log&&t&&t.from!==t.to)log.info({payoutId:t.payoutId,payee:groupLabel(t.payee),from:t.from,to:t.to,attempt:t.attempt,outcome:t.outcome},'Payout state changed');};
 export type SendClaim={payoutId:string;scenarioId:string;attemptNo:number;lease:string;accountToken:string;amountPaise:bigint};
 export type ReconcileClaim={payoutId:string;scenarioId:string;lease:string};
 type Unknown={kind:'UNKNOWN'};
@@ -97,8 +102,9 @@ export async function beginSend(db:Database,payoutId:string,o:{leaseSeconds?:num
   });
 }
 /** Phase 3 of a send: record the rail's answer, if the claim still holds. */
-export async function finishSend(db:Database,claim:SendClaim,outcome:SendOutcome|Unknown,o:{random?:()=>number}={}):Promise<string>{
-  return db.transaction(async tx=>{
+export async function finishSend(db:Database,claim:SendClaim,outcome:SendOutcome|Unknown,o:{random?:()=>number;log?:Logger}={}):Promise<string>{
+  let change:Transition|undefined;
+  const state=await db.transaction(async tx=>{
     const p=await lockPayout(tx,claim.payoutId);
     if(!p||p.state!=='IN_SETTLEMENT'||!holdsLease(p,claim.lease)||p.attempts!==claim.attemptNo)return 'STALE';
     const time=await simNow(tx,p.scenario_id),config=await readLedgerConfig(tx,p.scenario_id,time.sim);
@@ -117,8 +123,11 @@ export async function finishSend(db:Database,claim:SendClaim,outcome:SendOutcome
       // The attempt stays open until resolved by key, after a backoff that gives the rail time to register the request.
       case 'UNKNOWN':await setState(tx,p,'INDETERMINATE',{next:new Date(time.sim.getTime()+backoffSeconds(p.attempts,config.backoffBaseSeconds,BACKOFF_CAP_SECONDS,o.random)*1000)});break;
     }
+    change={payoutId:p.id,payee:p.payee_group_id,from:'IN_SETTLEMENT',to:p.state,attempt:claim.attemptNo,outcome:outcome.kind};
     return p.state;
   });
+  logTransition(o.log,change);
+  return state;
 }
 /** The rail call of a send, bounded by the deadline. Any failure is an unknown outcome, never a confirmed failure. */
 async function callSend(rail:PayoutRail,claim:SendClaim,o:SettlementOptions):Promise<SendOutcome|Unknown>{
@@ -150,31 +159,37 @@ export async function beginReconcile(db:Database,payoutId:string,o:{leaseSeconds
 }
 export type ReconcileResult={kind:'DONE';state:string}|{kind:'RESEND';claim:SendClaim}|{kind:'STALE'};
 /** Phase 3 of a resolve: apply what getByKey said (or that it could not say). NOT_FOUND may lead to a resend claim. */
-export async function finishReconcile(db:Database,payoutId:string,claim:ReconcileClaim,lookup:LookupOutcome|Unknown,o:{leaseSeconds?:number;deadlineMs?:number;random?:()=>number}={}):Promise<ReconcileResult>{
-  return db.transaction(async tx=>{
+export async function finishReconcile(db:Database,payoutId:string,claim:ReconcileClaim,lookup:LookupOutcome|Unknown,o:{leaseSeconds?:number;deadlineMs?:number;random?:()=>number;log?:Logger}={}):Promise<ReconcileResult>{
+  let change:Transition|undefined;
+  const result=await db.transaction(async tx=>{
     const p=await lockPayout(tx,payoutId);
     if(!p||!holdsLease(p,claim.lease))return {kind:'STALE'} as ReconcileResult;
+    const from=p.state,outcome=lookup.kind==='FOUND'?`FOUND_${lookup.status}`:lookup.kind;
+    const done=(r:ReconcileResult):ReconcileResult=>{change={payoutId:p.id,payee:p.payee_group_id,from,to:p.state,attempt:p.attempts,outcome};return r;};
     const time=await simNow(tx,p.scenario_id),config=await readLedgerConfig(tx,p.scenario_id,time.sim);
     const since=p.first_request_sim?(time.sim.getTime()-new Date(p.first_request_sim).getTime())/1000:0;
     if(lookup.kind==='FOUND'){
       await closeAttempt(tx,p,lookup.status==='REJECTED'||lookup.status==='VOIDED'?'REJECTED':'RESOLVED_FOUND',lookup.railRef);
       await applyFound(tx,p,lookup,time.sim);
-      return {kind:'DONE',state:p.state};
+      return done({kind:'DONE',state:p.state});
     }
     const later=new Date(time.sim.getTime()+backoffSeconds(Math.max(1,p.attempts),config.backoffBaseSeconds,BACKOFF_CAP_SECONDS,o.random)*1000);
     if(lookup.kind==='UNKNOWN'){
       // A fresh query that could not answer: after 24 simulated hours the payout is UNRESOLVED, and still polled.
       if(p.state==='INDETERMINATE'&&since>=UNRESOLVED_AFTER_SECONDS)await setState(tx,p,'UNRESOLVED',{next:new Date(time.sim.getTime()+BACKOFF_CAP_SECONDS*1000)});
       else await setState(tx,p,p.state,{next:p.state==='UNRESOLVED'?new Date(time.sim.getTime()+BACKOFF_CAP_SECONDS*1000):later});
-      return {kind:'DONE',state:p.state};
+      return done({kind:'DONE',state:p.state});
     }
-    if(p.state==='SENT'){await needsReview(tx,p,{flag:'SENT_NOT_FOUND'});return {kind:'DONE',state:p.state};}
+    if(p.state==='SENT'){await needsReview(tx,p,{flag:'SENT_NOT_FOUND'});return done({kind:'DONE',state:p.state});}
     await closeAttempt(tx,p,'RESOLVED_ABSENT');
-    if(since>=config.idempotencyWindowSeconds){await needsReview(tx,p,{confirmedUnpaid:true});return {kind:'DONE',state:p.state};}
-    if(p.state==='UNRESOLVED'){await setState(tx,p,'UNRESOLVED',{next:later});return {kind:'DONE',state:p.state};}
-    if(p.attempts>=MAX_ATTEMPTS){await needsReview(tx,p,{flag:'ATTEMPTS_EXHAUSTED'});return {kind:'DONE',state:p.state};}
-    return {kind:'RESEND',claim:await openAttempt(tx,p,time.sim,leaseFor(o))};
+    if(since>=config.idempotencyWindowSeconds){await needsReview(tx,p,{confirmedUnpaid:true});return done({kind:'DONE',state:p.state});}
+    if(p.state==='UNRESOLVED'){await setState(tx,p,'UNRESOLVED',{next:later});return done({kind:'DONE',state:p.state});}
+    if(p.attempts>=MAX_ATTEMPTS){await needsReview(tx,p,{flag:'ATTEMPTS_EXHAUSTED'});return done({kind:'DONE',state:p.state});}
+    const resend=await openAttempt(tx,p,time.sim,leaseFor(o));p.state='IN_SETTLEMENT';
+    return done({kind:'RESEND',claim:resend});
   });
+  logTransition(o.log,change);
+  return result;
 }
 export async function reconcilePayout(db:Database,payoutId:string,o:SettlementOptions):Promise<string>{
   const claim=await beginReconcile(db,payoutId,o);
@@ -192,7 +207,7 @@ export async function reconcilePayout(db:Database,payoutId:string,o:SettlementOp
  * confirmed, or the idempotency window has passed). voidKey runs outside any transaction; if the rail says the money already
  * went, the payout follows the rail instead and the cancel is refused.
  */
-export async function cancelPayout(db:Database,payoutId:string,o:{rail:PayoutRail;deadlineMs?:number}):Promise<{state:'CANCELLED';replayed:boolean}>{
+export async function cancelPayout(db:Database,payoutId:string,o:{rail:PayoutRail;deadlineMs?:number;audit?:(tx:Database,payee:string)=>Promise<unknown>}):Promise<{state:'CANCELLED';replayed:boolean}>{
   const p=(await db.query(`SELECT scenario_id,state,non_payment_confirmed AS npc,first_request_sim FROM demo_payouts WHERE id=$1`,[payoutId])).rows[0];
   if(!p)throw new WorkflowError('NOT_FOUND',404);
   if(p.state==='CANCELLED')return {state:'CANCELLED',replayed:true};
@@ -214,6 +229,7 @@ export async function cancelPayout(db:Database,payoutId:string,o:{rail:PayoutRai
       row.state='CANCELLED';
       await closeAttempt(tx,row,'RESOLVED_ABSENT');
       await reversePayout(tx,row,now.sim);
+      await o.audit?.(tx,row.payee_group_id);
       return 'CANCELLED';
     }
     if(found?.kind==='FOUND')await applyFound(tx,row,found,now.sim);

@@ -1,9 +1,11 @@
 import {DEFAULT_MARKET} from '../modules/market/application/orders.js';
 import {DEFAULT_PAYMENTS} from '../modules/market/application/payments.js';
 import type {MarketRoutesConfig} from '../modules/market/http/routes.js';
+import {presenterIdsFromEnvironment} from '../kernel/presenter.js';
 /**
  * Buyer slice settings. PAYMENT_WEBHOOK_SECRET enables the payment webhook (and, with DEMO_MODE=true, the presenter's
  * simulator controls); without it neither route exists. PAYMENT_WEBHOOK_SECRET_PREVIOUS keeps the old secret valid during rotation.
+ * DEMO_PRESENTER_IDS lists the accounts allowed to use presenter controls (default `presenter`).
  */
 export function marketConfig(env:NodeJS.ProcessEnv=process.env):MarketRoutesConfig{
   const secrets=[env.PAYMENT_WEBHOOK_SECRET,env.PAYMENT_WEBHOOK_SECRET_PREVIOUS].filter((v):v is string=>Boolean(v));
@@ -15,7 +17,7 @@ export function marketConfig(env:NodeJS.ProcessEnv=process.env):MarketRoutesConf
   if(!Number.isInteger(bps)||bps<0||bps>10000)throw new Error('DEMO_COMMISSION_BPS must be an integer from 0 to 10000');
   const failures=env.PAYMENT_MAX_EVENT_FAILURES===undefined||env.PAYMENT_MAX_EVENT_FAILURES===''?DEFAULT_PAYMENTS.maxEventFailures:Number(env.PAYMENT_MAX_EVENT_FAILURES);
   if(!Number.isInteger(failures)||failures<1||failures>100)throw new Error('PAYMENT_MAX_EVENT_FAILURES must be an integer from 1 to 100');
-  return {market:{...DEFAULT_MARKET,commissionBps:bps},payments:{...DEFAULT_PAYMENTS,secrets,maxEventFailures:failures},demoMode:demo==='true'};
+  return {market:{...DEFAULT_MARKET,commissionBps:bps},payments:{...DEFAULT_PAYMENTS,secrets,maxEventFailures:failures},demoMode:demo==='true',presenterIds:presenterIdsFromEnvironment(env.DEMO_PRESENTER_IDS)};
 }
 export function config() {
   const url=process.env.DATABASE_URL,origin=process.env.WEB_ORIGIN;

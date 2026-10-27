@@ -6,6 +6,7 @@ import {withScenarioLock} from '../application/lock.js';
 import {reapExpired,DEFAULT_MARKET} from '../application/orders.js';
 import {assertMarketInvariants} from '../application/invariants.js';
 import {EVENT_TYPES,handlePaymentEvent,settleRefunds,signWebhook,type PaymentConfig,type ProviderEvent,type WebhookResult} from '../application/payments.js';
+import {assertPayoutInvariants} from '../../payouts/application/invariants.js';
 const isEventType=(value:unknown):value is ProviderEvent['type']=>EVENT_TYPES.some(type=>type===value);
 /**
  * Deterministic stand-in for a payment provider (docs/22 B9). It builds and signs events exactly as a provider would and
@@ -81,5 +82,9 @@ export async function presenterInvariantReport(db:Database,actor:Actor){
   if(actor.role!=='agent')throw new WorkflowError('FORBIDDEN',403);
   const counts=new Map<string,number>();
   for(const v of await assertMarketInvariants(db))counts.set(v.code,(counts.get(v.code)??0)+1);
-  return {namespace:'DEMO_ONLY' as const,checkedAt:new Date().toISOString(),violations:[...counts].map(([code,count])=>({code,count}))};
+  // The payout ledger of the presenter's own scenario (docs/23 §8), also as codes and counts only.
+  const payouts=new Map<string,number>();
+  for(const v of await assertPayoutInvariants(db,actor.scenarioId))payouts.set(v.code,(payouts.get(v.code)??0)+1);
+  return {namespace:'DEMO_ONLY' as const,checkedAt:new Date().toISOString(),violations:[...counts].map(([code,count])=>({code,count})),
+    payoutViolations:[...payouts].map(([code,count])=>({code,count}))};
 }

@@ -16,7 +16,7 @@ export async function simNow(tx:Database,scenarioId:string):Promise<SimTime>{
  * Presenter control (docs/23 P7): advance by compare-and-set, so a repeated click with a stale offset cannot advance twice.
  * Taken under the scenario lock, so a sale never sees the clock move halfway through its fulfilment.
  */
-export async function advanceClock(db:Database,scenarioId:string,input:{expectedOffsetSeconds:number;advanceSeconds:number}):Promise<SimTime>{
+export async function advanceClock(db:Database,scenarioId:string,input:{expectedOffsetSeconds:number;advanceSeconds:number},audit?:(tx:Database,moved:SimTime)=>Promise<unknown>):Promise<SimTime>{
   const {expectedOffsetSeconds:expected,advanceSeconds:step}=input;
   if(!Number.isInteger(step)||step<1||step>CLOCK_MAX_STEP_SECONDS||!Number.isInteger(expected)||expected<0)throw new WorkflowError('VALIDATION_FAILED',422);
   return withScenarioLock(db,scenarioId,async tx=>{
@@ -25,6 +25,8 @@ export async function advanceClock(db:Database,scenarioId:string,input:{expected
     if(current!==expected)throw new WorkflowError('CLOCK_CONFLICT',409);
     if(current+step>CLOCK_MAX_OFFSET_SECONDS)throw new WorkflowError('CLOCK_LIMIT',409);
     await tx.query('UPDATE demo_clock SET offset_seconds=$2 WHERE scenario_id=$1',[scenarioId,current+step]);
-    return simNow(tx,scenarioId);
+    const moved=await simNow(tx,scenarioId);
+    await audit?.(tx,moved);
+    return moved;
   });
 }

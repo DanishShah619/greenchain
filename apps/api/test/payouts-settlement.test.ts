@@ -24,7 +24,9 @@ async function setup(suffix:SandboxSuffix='00',sales=2){
   const advance=async(seconds:number)=>{const now=await db.transaction(tx=>simNow(tx,scenario));await advanceClock(db,scenario,{expectedOffsetSeconds:now.offsetSeconds,advanceSeconds:seconds});};
   /** One worker cycle (batches, then rail tick, sends, resolves, polls), then two simulated hours pass. */
   const cycle=async(rail:PayoutRail=sandbox)=>{await runDueBatches(db,scenario);const r=await runSettlementCycle(db,scenario,{rail,random:()=>0.5});await advance(7200);return r;};
-  return {db,scenario,payee,sandbox,advance,cycle};
+  /** A presenter run: a batch now, whatever the simulated date (the scheduled run happens once per simulated IST day). */
+  const presenterBatch=async()=>{const b=await createPresenterBatch(db,scenario,{requestId:crypto.randomUUID(),actorId:'presenter'});return runBatch(db,b.batchId);};
+  return {db,scenario,payee,sandbox,advance,cycle,presenterBatch};
 }
 const setSuffix=(db:Database,payee:string,suffix:SandboxSuffix)=>db.query('UPDATE demo_payees SET account_token=$2 WHERE payee_group_id=$1',[payee,sandboxToken(payee,suffix)]);
 type P={id:string;state:string;attempts:number;npc:boolean;flags:string[];amount:bigint;token:string};
@@ -60,7 +62,7 @@ test('00: sent, then settled on the next poll; E13 posted, lots PAID, one transf
 });
 
 test('02: unknown outcomes are resolved by key and resent with the same key, at most 6 times; cancel waits for the window, then voids',async()=>{
-  const {db,scenario,sandbox,cycle,advance}=await setup('02');
+  const {db,scenario,sandbox,cycle,advance,presenterBatch}=await setup('02');
   for(let i=0;i<8;i++)await cycle();
   const p=await one(db);
   assert.equal(p.state,'NEEDS_REVIEW');assert.equal(p.attempts,6);assert.equal(p.npc,false,'not found inside the window is not proof of non-payment');
@@ -72,7 +74,7 @@ test('02: unknown outcomes are resolved by key and resent with the same key, at 
   assert.deepEqual(await lots(db),['RELEASED','RELEASED']);
   assert.equal((await db.query(`SELECT count(*)::int AS n FROM demo_journal_entries WHERE idempotency_key=$1`,[`PC:${p.id}`])).rows[0].n,1);
   await books(db,scenario,sandbox);
-  await cycle();
+  assert.equal((await presenterBatch()).payouts,1);
   assert.equal((await payouts(db)).length,2,'released lots go out again in a later batch');
 });
 
@@ -101,14 +103,15 @@ test('04: transient failures back off in simulated time, then succeed',async()=>
 });
 
 test('05: rejected means confirmed unpaid: review, re-verification, the next batch skips the payee, cancel is allowed at once',async()=>{
-  const {db,scenario,payee,sandbox,cycle}=await setup('05');
+  const {db,scenario,payee,sandbox,cycle,presenterBatch}=await setup('05');
   await cycle();
   const p=await one(db);
   assert.equal(p.state,'NEEDS_REVIEW');assert.equal(p.npc,true);assert.deepEqual(await attempts(db,p.id),['REJECTED']);
   assert.equal((await db.query('SELECT reverify_required FROM demo_payee_state WHERE payee_group_id=$1',[payee])).rows[0].reverify_required,true);
   assert.equal((await cancelPayout(db,p.id,{rail:sandbox})).state,'CANCELLED');
   await sellViaWebhook(db,{buyerId:'buyer-3'});
-  await cycle();
+  const next=await presenterBatch();
+  assert.equal(next.skippedReverify,1,'the batch saw the payee and skipped it');
   assert.equal((await payouts(db)).length,1,'skipped until re-verified');
   await books(db,scenario,sandbox);
 });
@@ -179,14 +182,14 @@ test('unknown lookups for 24 simulated hours make a payout UNRESOLVED; it is sti
 });
 
 test('a 30-day clock jump: an outcome found by key settles rather than going UNRESOLVED, and a live lease is untouched',async()=>{
-  const {db,scenario,sandbox,cycle,advance}=await setup('03');
+  const {db,scenario,sandbox,cycle,advance,presenterBatch}=await setup('03');
   await cycle();
   await advance(30*86400);
   await cycle();await cycle();
   assert.equal((await one(db)).state,'SETTLED');
   // A sender that claimed a payout and is still inside its real-time lease is not disturbed by simulated time.
   await sellViaWebhook(db,{buyerId:'buyer-3'});
-  await runDueBatches(db,scenario);
+  await presenterBatch();
   const fresh=(await payouts(db)).find(p=>p.state==='PENDING')!;
   const claim=await beginSend(db,fresh.id,{leaseSeconds:3600});assert.ok(claim);
   await advance(30*86400);

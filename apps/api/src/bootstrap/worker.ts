@@ -8,6 +8,8 @@ import {declareWorkerMetrics,newHealthState,nextSleepMs,workerCycle} from '../mo
 import {startOpsServer,type OpsServer} from './ops-server.js';
 import {marketConfig} from './config.js';
 import {newSweepState,sweepConfigFromEnvironment} from '../modules/market/application/sweep.js';
+import {newPayoutSweepState} from '../modules/payouts/application/sweep.js';
+import {SandboxRail} from '../modules/payouts/infrastructure/sandbox-rail.js';
 const log=createLogger('greenchain-worker');
 function integer(name:string,fallback:number,min:number,max:number){
   const raw=process.env[name];if(raw===undefined||raw==='')return fallback;
@@ -22,14 +24,16 @@ try {
   const policy=policyFromEnvironment(),fullVerifyHours=integer('AUDIT_FULL_VERIFY_HOURS',24,0,24*30),maxAgeSeconds=integer('HEALTH_MAX_AGE_SECONDS',120,10,3600);
   const opsSetting=process.env.WORKER_OPS_PORT??'4100',opsPort=opsSetting==='off'?0:integer('WORKER_OPS_PORT',4100,1,65535);
   database=connectDatabase(process.env.DATABASE_URL,auditKeyFromEnvironment());chain=await amoyFromEnvironment();
-  const market={config:sweepConfigFromEnvironment(marketConfig().market),state:newSweepState()};
+  const routes=marketConfig(),market={config:sweepConfigFromEnvironment(routes.market),state:newSweepState()};
+  // Payouts run only in demo mode, against the sandbox rail (the only rail; docs/23 P9).
+  const payouts=routes.demoMode?{rail:new SandboxRail(database.db),state:newPayoutSweepState(),invariantEverySeconds:market.config.invariantEverySeconds}:undefined;
   const metrics=new Metrics(),health=newHealthState('worker');declareWorkerMetrics(metrics);
   if(opsPort)ops=await startOpsServer({port:opsPort,host:process.env.WORKER_OPS_HOST??'127.0.0.1',metrics,health,maxAgeMs:maxAgeSeconds*1000});
   let stopped=false,wake:(()=>void)|undefined;
   for(const signal of ['SIGINT','SIGTERM']) process.on(signal,()=>{stopped=true;wake?.();});
-  log.info({chainConfigured:Boolean(chain),opsPort:ops?.port??null,fullVerifyHours,policy,market:{refundSettleAfterSeconds:market.config.refundSettleAfterSeconds,invariantEverySeconds:market.config.invariantEverySeconds}},'Worker started');
+  log.info({chainConfigured:Boolean(chain),opsPort:ops?.port??null,fullVerifyHours,policy,market:{refundSettleAfterSeconds:market.config.refundSettleAfterSeconds,invariantEverySeconds:market.config.invariantEverySeconds},payouts:Boolean(payouts)},'Worker started');
   while(!stopped){
-    const outcome=await workerCycle({db:database.db,chain,log,metrics,health,fullVerifyEveryMs:fullVerifyHours*3_600_000,cycle:{policy},market});
+    const outcome=await workerCycle({db:database.db,chain,log,metrics,health,fullVerifyEveryMs:fullVerifyHours*3_600_000,cycle:{policy},market,payouts});
     const sleep=nextSleepMs(outcome,health.consecutiveFailures);
     if(!stopped)await new Promise<void>(resolve=>{const timer=setTimeout(resolve,sleep);wake=()=>{clearTimeout(timer);resolve();};});
   }
