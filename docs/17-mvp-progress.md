@@ -161,6 +161,16 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
     - clean logs.
 - Each workspace panel now has its own error boundary, so one failing panel no longer blanks the page. A source test guards the wrapping, and it was checked in a browser.
 
+## Dependency security
+
+- 2026-10-27: Next.js 16.4.0 → 16.4.3, for two critical RCE advisories and one DoS.
+- Transitive patch updates:
+  - `fast-uri` 3.1.8 → 3.1.9 and 4.2.2 → 4.2.3. It is part of Fastify (API runtime): scheme spoofing and host confusion, moderate and low.
+  - `undici` 7.30.0 → 7.30.1 (Hardhat only): DoS and SRI bypass, high and moderate.
+  - `@nomicfoundation/hardhat-zod-utils` 3.0.7 → 3.0.8.
+- All suites pass, including the Hardhat local-node contract test.
+- Still open: the `hardhat` → `zod` advisory (high, a memory-exhaustion DoS in validation). It sits in the contract test tooling only, not the API runtime. The audit's only fix is a Hardhat major-version downgrade (3 → 2), so it is left for a Hardhat 3 release that updates `zod`.
+
 ## Remaining release work
 
 This does not complete week 1 or the public release gate: hosted staging, deployed PostgreSQL checks, phone OTP, production role/device policies, private object storage, cross-plot spatial checks and operational hardening remain. Offline shell behaviour is implemented and covered by automated worker/storage tests; real-device verification is still pending. Evidence approval does not make a credit or MRV/calculation-verification claim.
