@@ -153,7 +153,7 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
     - the database was dropped afterwards.
 - Step 6: the earnings statement on the agent's case view, and the presenter's payout panel in the PWA. The panel has the clock, payout runs, per-group simulated bank, cancel with a reason, and payout rules.
 - Step 6 validation:
-  - 16 web tests pass, the web typecheck is clean, and the static build passes. Every other build run stops at a Next.js advisory first and continues on retry; an upgrade is pending the owner's decision.
+  - 16 web tests pass, the web typecheck is clean, and the static build passes. Next.js was then upgraded from 16.4.0 to 16.4.3 for two critical advisories, and builds no longer stop at the advisory.
   - Browser check against a live API and worker:
     - sale, holdback date, clock jump, the worker paying, and the statement showing the credit paid;
     - a rejected payout cancelled through the form;

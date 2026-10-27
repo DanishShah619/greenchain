@@ -327,4 +327,6 @@ Step 6 (2026-10-27):
     - `DemoCalculationPanel` renders whatever part of a calculation result is present.
     - Checked in a browser: a malformed result no longer blanks the page, and a forced failure in the payout panel replaced only that panel, which recovered on "Try again".
     - React itself still logs caught errors to the browser console.
-- Build: `next build` stops on every other run at a Next.js 16.4.0 security advisory, and a retry continues. Patch releases 16.4.1–16.4.3 exist. Upgrading is a separate dependency decision for the owner.
+- Build: on 16.4.0, `next build` stopped on every other run at a security advisory.
+  - Upgraded to Next.js 16.4.3 (2026-10-27). That fixes GHSA-2464-fhr4-w9xw and GHSA-673q-mjm6-r5xr (both critical RCE) and GHSA-p3m5-59mp-jv5r (DoS).
+  - The lockfile change is limited to `next` and `@next/*`. Builds pass without the stop, and the web tests and a browser check pass.
