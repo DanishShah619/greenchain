@@ -34,6 +34,7 @@ Last updated: 2026-10-14 · Version: docs v2 (draft) · Maintainer: project team
 | 25 | [docs/22-demo-buyer-purchase.md](docs/22-demo-buyer-purchase.md) | Buyer slice: marketplace, FCAE v0 reservation, simulated payment, fulfilment, failure modes and test plan | Implemented (all six build steps); real-phone checks deferred |
 | 27 | [docs/24-demo-certificate-reset.md](docs/24-demo-certificate-reset.md) | Purchase certificate (frozen, hashed, verifiable by URL) and safe presenter reset by scenario rotation | Signed off; implemented and verified (races, live run, browser) |
 | 26 | [docs/23-demo-earnings-payouts.md](docs/23-demo-earnings-payouts.md) | Earnings journal, lots, holdback, payout batcher, sandbox rail, statement and demo clock | Revision 2 signed off; implemented (all six build steps: schema, earnings, parity, clock, batcher, rail and settlement, routes, presenter guard, worker, metrics, invariants, web) |
+| 28 | [docs/25-demo-retirement.md](docs/25-demo-retirement.md) | Credit retirement for a reporting period, retirement certificate, live retired counts on purchase verification | Signed off; implemented on `feat/retirement` |
 
 Application setup and local preview commands: [README.md](README.md).
 

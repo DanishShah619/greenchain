@@ -10,6 +10,7 @@ import type {Metrics} from '../../../kernel/metrics.js';
 import {requirePresenter,type PresenterPolicy} from '../../../kernel/presenter.js';
 import {SHOWCASE_MARKET} from '../application/seed.js';
 import {getCertificate,issueCertificate,verifyCertificate} from '../application/certificates.js';
+import {CREDIT_ID,getRetirementCertificate,listRetirements,PURPOSE,REPORTING_PERIOD,retireCredits} from '../application/retirements.js';
 export type MarketRoutesConfig={market:MarketConfig;payments:PaymentConfig;demoMode:boolean;webhookRatePerMinute?:number;
   /** Accounts allowed to use presenter controls (docs/23 P11); defaults to the seeded `presenter`. */presenterIds?:string[];
   /** Public certificate verifications per minute per address (docs/24 C5); default 60. */certificateRatePerMinute?:number;
@@ -18,6 +19,8 @@ export const WEBHOOK_PATH='/api/v1/payments/webhooks/simulator';
 type ResolveActor=(request:FastifyRequest,write?:boolean)=>Promise<Actor>;
 const uuid={type:'string',format:'uuid'} as const;
 const idParams={type:'object',additionalProperties:false,required:['id'],properties:{id:uuid}} as const;
+// The service re-checks all of these (and that an FY period names consecutive years); the schema answers malformed input with 400.
+const retireTerms={requestId:uuid,reportingPeriod:{type:'string',pattern:REPORTING_PERIOD.source},purpose:{type:'string',maxLength:120,pattern:PURPOSE.source}} as const;
 export const presenterPolicy=(config:MarketRoutesConfig):PresenterPolicy=>({demoMode:config.demoMode,presenterIds:config.presenterIds??['presenter'],publicScenarioId:SHOWCASE_MARKET.scenarioId});
 export async function registerMarketRoutes(app:FastifyInstance,db:Database,actor:ResolveActor,config:MarketRoutesConfig){
   const metrics=config.metrics;
@@ -43,9 +46,22 @@ export async function registerMarketRoutes(app:FastifyInstance,db:Database,actor
     return reply.code(result.replayed?200:201).send(result);
   });
   app.get<{Params:{id:string}}>('/api/v1/orders/:id/certificate',{schema:{params:idParams}},async request=>getCertificate(db,await actor(request),request.params.id));
+  // Retirement (docs/25): the buyer retires credits it bought, by count from one paid order or by credit ids across its orders.
+  app.post<{Params:{id:string};Body:{requestId:string;count:number;reportingPeriod:string;purpose?:string}}>('/api/v1/orders/:id/retirements',{schema:{params:idParams,
+    body:{type:'object',additionalProperties:false,required:['requestId','count','reportingPeriod'],properties:{...retireTerms,count:{type:'integer',minimum:1,maximum:100}}}}},async(request,reply)=>{
+    const result=await retireCredits(db,await actor(request,true),{...request.body,orderId:request.params.id});
+    return reply.code(result.replayed?200:201).send(result);
+  });
+  app.post<{Body:{requestId:string;creditIds:string[];reportingPeriod:string;purpose?:string}}>('/api/v1/retirements',{schema:{body:{type:'object',additionalProperties:false,
+    required:['requestId','creditIds','reportingPeriod'],properties:{...retireTerms,creditIds:{type:'array',minItems:1,maxItems:100,uniqueItems:true,items:{type:'string',pattern:CREDIT_ID.source}}}}}},async(request,reply)=>{
+    const result=await retireCredits(db,await actor(request,true),request.body);
+    return reply.code(result.replayed?200:201).send(result);
+  });
+  app.get('/api/v1/retirements',async request=>listRetirements(db,await actor(request)));
+  app.get<{Params:{id:string}}>('/api/v1/retirements/:id/certificate',{schema:{params:idParams}},async request=>getRetirementCertificate(db,await actor(request),request.params.id));
   const verifyLimit=config.certificateRatePerMinute??60,verifySeen=new Map<string,{windowStart:number;count:number}>();
   app.get<{Params:{number:string};Querystring:{hash?:string}}>('/api/v1/certificates/:number',{schema:{
-    params:{type:'object',additionalProperties:false,required:['number'],properties:{number:{type:'string',pattern:'^GC-DEMO-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$'}}},
+    params:{type:'object',additionalProperties:false,required:['number'],properties:{number:{type:'string',pattern:'^GC-(DEMO|RETIRE)-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$'}}},
     querystring:{type:'object',additionalProperties:false,properties:{hash:{type:'string',pattern:'^[0-9a-f]{64}$'}}}}},async(request,reply)=>{
     const now=Date.now(),entry=verifySeen.get(request.ip);
     if(!entry||now-entry.windowStart>=60_000)verifySeen.set(request.ip,{windowStart:now,count:1});

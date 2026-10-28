@@ -168,6 +168,15 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
 - Safe reset: rotation into a freshly seeded scenario. Nothing is deleted, so the global audit chain and every append-only ledger stay intact. The old scenario is retired: nothing new starts there, while money already in flight finishes.
 - Validation: tests written first, real-PostgreSQL races, 13 rule mutations caught, and a browser check of certificate, print layout, verification and reset with clean logs (details in doc 24 §7). Printing to an actual PDF file remains a manual check.
 
+## Credit retirement
+
+- Spec: [document 25](25-demo-retirement.md), signed off 2026-10-28.
+- A buyer retires credits it bought, for a reporting period (`FY2026-27` or `2026`) with an optional public purpose. It chooses by count from one paid order or by credit ids across its paid orders. RETIRED is terminal, and no money moves.
+- Each retirement gets a frozen, hashed `GC-RETIRE-…` certificate, verifiable at the same public URL and on `verify.html`. Verifying a purchase certificate also reports, live, how many of its credits were retired since.
+- The database refuses a retirement without its record, a record for someone else's or an unsold credit, and retirements in a retired scenario. A new invariant, `RETIRED_WITHOUT_RECORD`, backs this up.
+- The PWA gains a retire form on paid orders, retired markers, purchased/retired/held totals and the retirement certificate.
+- Validation: see doc 25 §6.
+
 ## Dependency security
 
 - 2026-10-27: Next.js 16.4.0 → 16.4.3, for two critical RCE advisories and one DoS.
