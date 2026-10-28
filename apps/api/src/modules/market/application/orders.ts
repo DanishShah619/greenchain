@@ -4,7 +4,7 @@ import {WorkflowError} from '../../../kernel/errors.js';
 import {appendAudit} from '../../audit/application/audit.js';
 import type {Actor} from '../../capture/application/capture.js';
 import {allocateFcaeV0,quotaFor,TIER_WEIGHT_V0,waitingDays,type FcaeResult,type GroupInput} from '../domain/fcae.js';
-import {withScenarioLock} from './lock.js';
+import {withNewWorkLock,withScenarioLock} from './lock.js';
 /** Buyer orders: create (allocate and reserve), accept a partial offer, cancel, and the reservation reaper (docs/22 §6.2-6.3). */
 export type MarketConfig={commissionBps:number;reservationSeconds:number;shortfallHoldSeconds:number};
 export const DEFAULT_MARKET:MarketConfig={commissionBps:500,reservationSeconds:300,shortfallHoldSeconds:900};
@@ -172,7 +172,7 @@ export async function createOrder(db:Database,actor:Actor,input:CreateOrderInput
     if(prior.request_hash!==requestHash)throw new WorkflowError('KEY_REUSE');
     return orderView(tx,prior,{replayed:true,quotedTotalPaise:input.quotedTotalPaise});
   };
-  return backstopUniqueViolation(()=>withScenarioLock(db,actor.scenarioId,async(tx,asOf)=>{
+  return backstopUniqueViolation(()=>withNewWorkLock(db,actor.scenarioId,async(tx,asOf)=>{
       const prior=await byRequest(tx,actor,input.requestId);
       if(prior)return replay(prior,tx);
       await reapExpired(tx,actor.scenarioId,asOf,config);
@@ -200,7 +200,7 @@ export async function createOrder(db:Database,actor:Actor,input:CreateOrderInput
  */
 export async function acceptPartial(db:Database,actor:Actor,orderId:string,config:MarketConfig=DEFAULT_MARKET):Promise<OrderView>{
   requireBuyer(actor);
-  return backstopUniqueViolation(()=>withScenarioLock(db,actor.scenarioId,async(tx,asOf)=>{
+  return backstopUniqueViolation(()=>withNewWorkLock(db,actor.scenarioId,async(tx,asOf)=>{
     const order=await ownedOrder(tx,actor,orderId,true);
     if(order.state!=='CREATED'){
       // A repeated accept after success is answered with the current order.

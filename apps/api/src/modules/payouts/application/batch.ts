@@ -111,9 +111,12 @@ export async function runBatch(db:Database,batchId:string,options:{onPayeeError?
   await db.query(`UPDATE demo_payout_batches SET status=$2,finished_at=CASE WHEN $2='COMPLETED' THEN now() END WHERE id=$1 AND status<>'COMPLETED' AND status IS DISTINCT FROM $2`,[batchId,summary.status]);
   return summary;
 }
-/** Worker entry: create today's scheduled run if missing, then run every batch of the scenario that is not complete. */
-export async function runDueBatches(db:Database,scenarioId:string,options:{onPayeeError?:(error:unknown)=>void}={}):Promise<BatchSummary[]>{
-  await ensureScheduledBatch(db,scenarioId);
+/**
+ * Worker entry: create today's scheduled run if missing, then run every batch of the scenario that is not complete.
+ * scheduled:false (a retired scenario, docs/24 R4) only resumes runs already started.
+ */
+export async function runDueBatches(db:Database,scenarioId:string,options:{onPayeeError?:(error:unknown)=>void;scheduled?:boolean}={}):Promise<BatchSummary[]>{
+  if(options.scheduled!==false)await ensureScheduledBatch(db,scenarioId);
   const open=(await db.query(`SELECT id::text AS id FROM demo_payout_batches WHERE scenario_id=$1 AND status<>'COMPLETED' ORDER BY created_at,run_seq`,[scenarioId])).rows.map(r=>r.id as string);
   const results:BatchSummary[]=[];
   for(const id of open)results.push(await runBatch(db,id,options));

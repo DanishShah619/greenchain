@@ -9,8 +9,10 @@ import {WorkflowError} from '../../../kernel/errors.js';
 import type {Metrics} from '../../../kernel/metrics.js';
 import {requirePresenter,type PresenterPolicy} from '../../../kernel/presenter.js';
 import {SHOWCASE_MARKET} from '../application/seed.js';
+import {getCertificate,issueCertificate,verifyCertificate} from '../application/certificates.js';
 export type MarketRoutesConfig={market:MarketConfig;payments:PaymentConfig;demoMode:boolean;webhookRatePerMinute?:number;
   /** Accounts allowed to use presenter controls (docs/23 P11); defaults to the seeded `presenter`. */presenterIds?:string[];
+  /** Public certificate verifications per minute per address (docs/24 C5); default 60. */certificateRatePerMinute?:number;
   /** Optional; declare with declareMarketApiMetrics. */metrics?:Metrics};
 export const WEBHOOK_PATH='/api/v1/payments/webhooks/simulator';
 type ResolveActor=(request:FastifyRequest,write?:boolean)=>Promise<Actor>;
@@ -35,6 +37,22 @@ export async function registerMarketRoutes(app:FastifyInstance,db:Database,actor
   app.post<{Params:{id:string}}>('/api/v1/orders/:id/cancel',{schema:{params:idParams}},async request=>cancelOrder(db,await actor(request,true),request.params.id));
   app.post<{Params:{id:string};Body:{acceptSnapshotHash:string}}>('/api/v1/orders/:id/payment-attempts',{schema:{params:idParams,body:{type:'object',additionalProperties:false,
     required:['acceptSnapshotHash'],properties:{acceptSnapshotHash:{type:'string',pattern:'^[0-9a-f]{64}$'}}}}},async request=>startPaymentAttempt(db,await actor(request,true),request.params.id,request.body,config.market,config.payments.provider));
+  // Purchase certificates (docs/24): the buyer issues and views its own; anyone can verify one by number.
+  app.post<{Params:{id:string}}>('/api/v1/orders/:id/certificate',{schema:{params:idParams}},async(request,reply)=>{
+    const result=await issueCertificate(db,await actor(request,true),request.params.id);
+    return reply.code(result.replayed?200:201).send(result);
+  });
+  app.get<{Params:{id:string}}>('/api/v1/orders/:id/certificate',{schema:{params:idParams}},async request=>getCertificate(db,await actor(request),request.params.id));
+  const verifyLimit=config.certificateRatePerMinute??60,verifySeen=new Map<string,{windowStart:number;count:number}>();
+  app.get<{Params:{number:string};Querystring:{hash?:string}}>('/api/v1/certificates/:number',{schema:{
+    params:{type:'object',additionalProperties:false,required:['number'],properties:{number:{type:'string',pattern:'^GC-DEMO-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$'}}},
+    querystring:{type:'object',additionalProperties:false,properties:{hash:{type:'string',pattern:'^[0-9a-f]{64}$'}}}}},async(request,reply)=>{
+    const now=Date.now(),entry=verifySeen.get(request.ip);
+    if(!entry||now-entry.windowStart>=60_000)verifySeen.set(request.ip,{windowStart:now,count:1});
+    else if(++entry.count>verifyLimit)return reply.header('Retry-After','60').code(429).send({code:'RATE_LIMITED',retryable:true});
+    if(verifySeen.size>10_000)verifySeen.clear();
+    return verifyCertificate(db,request.params.number,request.query.hash);
+  });
   // The provider webhook exists only when a secret is configured. It is authenticated by signature, not by cookie or CSRF,
   // and it needs the raw bytes: the signature covers the exact body, so the JSON parser is replaced inside this scope only.
   if(config.payments.secrets.length){
@@ -71,6 +89,11 @@ export async function registerMarketRoutes(app:FastifyInstance,db:Database,actor
     const presenter=async(request:FastifyRequest,write=false)=>{const who=await actor(request,write);await requirePresenter(db,who,policy);return who;};
     app.get('/api/v1/demo/orders',async request=>presenterOrders(db,await presenter(request)));
     app.get('/api/v1/demo/invariants',async request=>presenterInvariantReport(db,await presenter(request)));
+    app.get<{Params:{id:string}}>('/api/v1/demo/orders/:id/certificate',{schema:{params:idParams}},async request=>getCertificate(db,await presenter(request),request.params.id,{asPresenter:true}));
+    app.post<{Params:{id:string}}>('/api/v1/demo/orders/:id/certificate',{schema:{params:idParams}},async(request,reply)=>{
+      const result=await issueCertificate(db,await presenter(request,true),request.params.id,{asPresenter:true});
+      return reply.code(result.replayed?200:201).send(result);
+    });
     app.post<{Params:{id:string};Body:{outcome:SimulatedOutcome}}>('/api/v1/demo/orders/:id/simulate',{schema:{params:idParams,body:{type:'object',additionalProperties:false,
       required:['outcome'],properties:{outcome:{enum:[...SIMULATED_OUTCOMES]}}}}},async(request,reply)=>{
       const result=await simulate(db,await presenter(request,true),request.params.id,request.body.outcome,config.payments);

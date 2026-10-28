@@ -2,7 +2,7 @@ import type {Database} from '../../../kernel/database.js';
 import {WorkflowError} from '../../../kernel/errors.js';
 import {appendAudit} from '../../audit/application/audit.js';
 import type {Actor} from '../../capture/application/capture.js';
-import {withScenarioLock} from '../../market/application/lock.js';
+import {withNewWorkLock} from '../../market/application/lock.js';
 import {groupLabel} from '../../market/application/orders.js';
 import {requireCase} from '../../review/application/workflow.js';
 import {sandboxToken,type SandboxSuffix} from '../domain/config.js';
@@ -37,7 +37,7 @@ export type ConfigInput={holdbackDays:number;reserveBps:number;minPayoutPaise:st
 export async function presenterSetConfig(db:Database,actor:Actor,input:ConfigInput){
   const min=BigInt(input.minPayoutPaise),limit=BigInt(input.payoutLimitPaise);
   if(min<=0n||limit<min)throw new WorkflowError('VALIDATION_FAILED',422);
-  return withScenarioLock(db,actor.scenarioId,async tx=>{
+  return withNewWorkLock(db,actor.scenarioId,async tx=>{
     const time=await simNow(tx,actor.scenarioId),current=await readLedgerConfig(tx,actor.scenarioId,time.sim);
     const backoff=input.backoffBaseSeconds??current.backoffBaseSeconds,window=input.idempotencyWindowSeconds??current.idempotencyWindowSeconds;
     const version=(await tx.query(`INSERT INTO demo_ledger_config(scenario_id,version,holdback_days,reserve_bps,min_payout_paise,payout_limit_paise,backoff_base_seconds,idempotency_window_seconds,effective_from,created_by)

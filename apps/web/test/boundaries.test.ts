@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 // One panel that meets unexpected data must not blank the whole workspace: every independent panel on the page sits inside its
 // own error boundary. The web tests have no DOM, so this checks the page source; the fallback itself is checked in a browser.
 const page=readFileSync(new URL('../app/page.tsx',import.meta.url),'utf8');
-const PANELS=['DemoCalculationPanel','EarningsStatement','PresenterMarketPanel','PresenterPayoutPanel','BuyerWorkspace','VerifierWorkspace'];
+const PANELS=['DemoCalculationPanel','EarningsStatement','PresenterMarketPanel','PresenterPayoutPanel','BuyerWorkspace','VerifierWorkspace','ScenarioResetPanel'];
 test('every workspace panel is rendered inside its own PanelBoundary',()=>{
   for(const panel of PANELS){
     const uses=page.match(new RegExp(`<${panel}\\b`,'g'))?.length??0;

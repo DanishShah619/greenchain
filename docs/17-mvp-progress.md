@@ -161,6 +161,13 @@ Started 2026-10-14 against the synthetic public demo scope in document 13.
     - clean logs.
 - Each workspace panel now has its own error boundary, so one failing panel no longer blanks the page. A source test guards the wrapping, and it was checked in a browser.
 
+## Certificate and safe reset
+
+- Spec: [document 24](24-demo-certificate-reset.md), signed off 2026-10-28.
+- Purchase certificates: one per paid order, built from stored rows and frozen with a SHA-256 over canonical JSON, with a random number. They are verifiable by anyone at a public, rate-limited URL and on the PWA's `/verify` page, and printable to PDF.
+- Safe reset: rotation into a freshly seeded scenario. Nothing is deleted, so the global audit chain and every append-only ledger stay intact. The old scenario is retired: nothing new starts there, while money already in flight finishes.
+- Validation: tests written first, real-PostgreSQL races, 13 rule mutations caught, and a browser check of certificate, print layout, verification and reset with clean logs (details in doc 24 §7). Printing to an actual PDF file remains a manual check.
+
 ## Dependency security
 
 - 2026-10-27: Next.js 16.4.0 → 16.4.3, for two critical RCE advisories and one DoS.

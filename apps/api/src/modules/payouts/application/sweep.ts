@@ -32,12 +32,14 @@ export function declarePayoutWorkerMetrics(metrics:Metrics){
 }
 export async function payoutSweep(db:Database,o:PayoutSweepDeps&{metrics?:Metrics;log?:Logger;now?:()=>number}):Promise<{worked:boolean}>{
   const {metrics,log,state}=o,now=o.now??Date.now;
-  const scenarios=(await db.query('SELECT scenario_id FROM demo_namespaces ORDER BY scenario_id')).rows.map(r=>r.scenario_id as string);
+  const namespaces=(await db.query('SELECT scenario_id,retired_at IS NOT NULL AS retired FROM demo_namespaces ORDER BY scenario_id')).rows as {scenario_id:string;retired:boolean}[];
+  const scenarios=namespaces.map(n=>n.scenario_id),retired=new Set(namespaces.filter(n=>n.retired).map(n=>n.scenario_id));
   let worked=false;
   for(const scenario of scenarios){
     try{
       const onError=(error:unknown)=>log?.warn({scenario,...safeErrorFields(error)},'Payout step error');
-      for(const b of await runDueBatches(db,scenario,{onPayeeError:onError})){
+      // A retired scenario starts no new runs, but money already in flight there is followed to a final state.
+      for(const b of await runDueBatches(db,scenario,{onPayeeError:onError,scheduled:!retired.has(scenario)})){
         metrics?.inc('greenchain_payout_rollovers_total',{},b.rolledOver);
         if(b.payouts||b.rolledOver||b.failedPayees||b.oversizedLots)log?.info({scenario,batchId:b.batchId,runDate:b.runDate,runSeq:b.runSeq,status:b.status,payouts:b.payouts,
           rolledOver:b.rolledOver,skippedReverify:b.skippedReverify,oversizedLots:b.oversizedLots,failedPayees:b.failedPayees},'Payout batch');

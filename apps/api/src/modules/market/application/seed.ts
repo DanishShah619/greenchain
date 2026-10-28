@@ -16,9 +16,14 @@ const uuidFrom=(name:string)=>{
   const h=createHash('sha256').update(`greenchain-demo-market:${name}`).digest('hex');
   return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-8${h.slice(17,20)}-${h.slice(20,32)}`;
 };
-export async function seedDemoMarket(db:Database,o:{scenarioId:string;groups?:number;perGroup?:number;pricePaise?:bigint;now?:Date}){
-  const groups=o.groups??20,perGroup=o.perGroup??10,now=o.now??new Date(),scenario=o.scenarioId,reviewer=`${scenario}-market-reviewer`;
-  return db.transaction(async tx=>{
+export type MarketSeed={scenarioId:string;groups?:number;perGroup?:number;pricePaise?:bigint;now?:Date};
+/** The seed account that signs the synthetic reviews of a scenario's market (never a person; never moved by a reset). */
+export const marketReviewerId=(scenarioId:string)=>`${scenarioId}-market-reviewer`;
+export function seedDemoMarket(db:Database,o:MarketSeed){return db.transaction(tx=>seedDemoMarketTx(tx,o));}
+/** The seed itself, inside a caller's transaction (the presenter reset seeds its new scenario atomically with the rotation). */
+export async function seedDemoMarketTx(tx:Database,o:MarketSeed){
+  const groups=o.groups??20,perGroup=o.perGroup??10,now=o.now??new Date(),scenario=o.scenarioId,reviewer=marketReviewerId(scenario);
+  {
     // A reviewer row exists only to satisfy foreign keys; its password is random and never stored anywhere.
     await tx.query(`INSERT INTO users(id,scenario_id,role,password_hash) VALUES ($1,$2,'verifier',$3) ON CONFLICT DO NOTHING`,[reviewer,scenario,hashPassword(randomBytes(32).toString('hex'))]);
     await tx.query(`INSERT INTO demo_price_list(scenario_id,effective_from,unit_price_paise,created_by) VALUES ($1,'2026-01-01T00:00:00Z',$2,'seed') ON CONFLICT DO NOTHING`,[scenario,String(o.pricePaise??DEMO_PRICE_PAISE)]);
@@ -39,5 +44,5 @@ export async function seedDemoMarket(db:Database,o:{scenarioId:string;groups?:nu
       await tx.query(`INSERT INTO demo_credits(id,batch_id,ordinal,available_since) SELECT 'DEMO-2026-'||$1::text||'-'||lpad(n::text,6,'0'),$1::uuid,n,$3 FROM generate_series(1,$2::integer) AS n`,[batch,perGroup,since]);
     }
     return {groupsCreated:created};
-  });
+  }
 }

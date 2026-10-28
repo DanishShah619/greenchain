@@ -17,6 +17,7 @@ import {registerDemoRegistryRoutes} from '../modules/registry/http/routes.js';
 import {registerAuditRoutes} from '../modules/audit/http/routes.js';
 import {presenterPolicy,registerMarketRoutes,WEBHOOK_PATH,type MarketRoutesConfig} from '../modules/market/http/routes.js';
 import {registerPayoutRoutes} from '../modules/payouts/http/routes.js';
+import {registerDemoRoutes} from '../modules/demo/http/routes.js';
 import {SandboxRail} from '../modules/payouts/infrastructure/sandbox-rail.js';
 import {DEFAULT_MARKET} from '../modules/market/application/orders.js';
 import {DEFAULT_PAYMENTS} from '../modules/market/application/payments.js';
@@ -130,5 +131,6 @@ export async function buildApp(db: Database, config: {origin:string; secure:bool
   await registerMarketRoutes(app,db,resolveActor,market);
   // The sandbox rail is the only rail (docs/23 P9); payouts exist only in demo scenarios.
   await registerPayoutRoutes(app,db,resolveActor,{policy:presenterPolicy(market),rail:new SandboxRail(db)});
+  await registerDemoRoutes(app,db,resolveActor,presenterPolicy(market));
   return app;
 }

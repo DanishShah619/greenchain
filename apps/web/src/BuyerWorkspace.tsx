@@ -1,5 +1,6 @@
 'use client';
 import {useEffect,useState,type FormEvent} from 'react';
+import {CertificateView,type Certificate} from './CertificateView';
 import {formatPaise,isSettling,parseQuantity,quotePaise,remaining,SHORTFALL_REASONS,stateLabel} from './market';
 type Request=(path:string,options?:RequestInit)=>Promise<any>;
 type Group={group:string;vintage:number;available:number;reserved:number;sold:number;provenance:{batchId:string;calculationId:string}};
@@ -22,6 +23,7 @@ export function BuyerWorkspace({request,online=true}:{request:Request;online?:bo
   const [quantityText,setQuantityText]=useState('5'),[requestId,setRequestId]=useState(()=>crypto.randomUUID());
   const quantity=parseQuantity(quantityText);
   const [message,setMessage]=useState(''),[busy,setBusy]=useState(false),[now,setNow]=useState(()=>Date.now());
+  const [certificate,setCertificate]=useState<Certificate|null>(null);
   // Orders and payments are never queued offline (docs/06 §7): every action needs the server, so it is disabled with a reason.
   const blocked=busy||!online;
   const fail=(error:unknown,fallback:string)=>setMessage(error instanceof Error?error.message:fallback);
@@ -84,6 +86,8 @@ export function BuyerWorkspace({request,online=true}:{request:Request;online?:bo
       {o.state==='AWAITING_PAYMENT'&&!openAttempt&&<button disabled={blocked} onClick={()=>act('payment-attempts',{acceptSnapshotHash:order.snapshotHash},'Payment restarted.')}>Try payment again</button>}
       {(o.state==='RESERVED'||o.state==='AWAITING_PAYMENT')&&<button className="secondary" disabled={blocked} onClick={()=>act('cancel',{},'Order cancelled and credits released.')}>Cancel order</button>}
       {o.state==='FULFILLED'&&<p className="notice">Purchased {order.purchased.length} demo credits. Each one below is now yours and cannot be sold again.</p>}
+      {o.state==='FULFILLED'&&<button className="secondary" disabled={blocked} onClick={async()=>{setBusy(true);try{setCertificate((await request(`/orders/${o.id}/certificate`,{method:'POST'})).certificate);}catch(error){fail(error,'Could not issue the certificate.');}finally{setBusy(false);}}}>View purchase certificate</button>}
+      {certificate&&certificate.content.number&&<CertificateView certificate={certificate} onClose={()=>setCertificate(null)}/>}
       {o.state==='EXPIRED'&&<p className="notice">The reservation ended before payment. The credits went back on sale. If you were charged, the payment is checked and either completes this order or is refunded in full.</p>}
       {order.purchased.length>0&&<details open><summary>Your credits ({order.purchased.length})</summary><ul className="credit-list">{order.purchased.map(c=><li key={c.creditId}><code>{c.creditId}</code><span>{formatPaise(c.pricePaise)}</span></li>)}</ul></details>}
       {order.purchased.length===0&&order.items.length>0&&o.state!=='CREATED'&&<details><summary>{order.items.some(i=>i.active)?'Reserved credits':'Previously reserved credits'} ({order.items.length})</summary><ul className="credit-list">{order.items.map(i=><li key={i.creditId}><code>{i.creditId}</code><span>{i.group}{i.active?'':' · released'}</span></li>)}</ul></details>}

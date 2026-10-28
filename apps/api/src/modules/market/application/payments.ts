@@ -5,7 +5,7 @@ import {appendAudit} from '../../audit/application/audit.js';
 import type {Actor} from '../../capture/application/capture.js';
 import {ledgerLine} from '../domain/money.js';
 import {postEarnings} from '../../payouts/application/earnings.js';
-import {withScenarioLock} from './lock.js';
+import {withNewWorkLock,withScenarioLock} from './lock.js';
 import {DEFAULT_MARKET,orderAnchor,orderView,ownedOrder,reapExpired,requireBuyer,snapshotHash,systemActor,type MarketConfig,type OrderView} from './orders.js';
 /**
  * Payments (docs/22 §6.1): starting an attempt, and applying signed provider events. The rule that matters most:
@@ -67,7 +67,7 @@ export function parseEventBody(raw:Buffer):ProviderEvent|null{
  */
 export async function startPaymentAttempt(db:Database,actor:Actor,orderId:string,input:{acceptSnapshotHash:string},market:MarketConfig=DEFAULT_MARKET,provider='simulator'):Promise<OrderView&{attemptId:string;providerRef:string}>{
   requireBuyer(actor);
-  return withScenarioLock(db,actor.scenarioId,async(tx,asOf)=>{
+  return withNewWorkLock(db,actor.scenarioId,async(tx,asOf)=>{
     await ownedOrder(tx,actor,orderId,false);
     await reapExpired(tx,actor.scenarioId,asOf,market);
     const order=await ownedOrder(tx,actor,orderId,true);

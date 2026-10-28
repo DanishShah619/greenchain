@@ -8,7 +8,9 @@ import {WorkflowError} from './errors.js';
 export type PresenterPolicy={demoMode:boolean;presenterIds:readonly string[];publicScenarioId:string};
 export async function requirePresenter(db:Database,actor:{id:string;role:string;scenarioId:string},policy:PresenterPolicy):Promise<void>{
   if(!policy.demoMode||actor.role!=='agent'||!policy.presenterIds.includes(actor.id)||actor.scenarioId===policy.publicScenarioId)throw new WorkflowError('FORBIDDEN',403);
-  if(!(await db.query('SELECT 1 FROM demo_namespaces WHERE scenario_id=$1',[actor.scenarioId])).rows.length)throw new WorkflowError('DEMO_SCOPE_ONLY',403);
+  const namespace=(await db.query('SELECT retired_at FROM demo_namespaces WHERE scenario_id=$1',[actor.scenarioId])).rows[0];
+  if(!namespace)throw new WorkflowError('DEMO_SCOPE_ONLY',403);
+  if(namespace.retired_at)throw new WorkflowError('SCENARIO_RETIRED',409);
 }
 /** DEMO_PRESENTER_IDS: comma-separated user ids; defaults to the seeded `presenter` account. */
 export function presenterIdsFromEnvironment(raw:string|undefined):string[]{

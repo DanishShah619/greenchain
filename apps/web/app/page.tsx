@@ -11,6 +11,8 @@ import {PresenterPayoutPanel} from '../src/PresenterPayoutPanel';
 import {EarningsStatement} from '../src/EarningsStatement';
 import {PAYOUT_MESSAGES} from '../src/payouts';
 import {PanelBoundary} from '../src/PanelBoundary';
+import {ScenarioResetPanel} from '../src/ScenarioResetPanel';
+import {CERTIFICATE_MESSAGES} from '../src/certificates';
 import {MARKET_MESSAGES} from '../src/market';
 type Capture={event_id?:string;farmer_label:string;village:string;area_hectares:string;status:string;review_state?:string;calculated_area?:string};
 const API=process.env.NEXT_PUBLIC_API_URL??'http://localhost:4000';
@@ -19,7 +21,7 @@ class ApiError extends Error{constructor(public code:string){super(explanations[
 Object.assign(explanations,{EVIDENCE_NOT_APPROVED:'Complete evidence approval before calculating.',STALE_EVIDENCE:'The evidence no longer matches its approved snapshot. Calculation is blocked.',DEMO_SCOPE_ONLY:'Synthetic calculations are allowed only in the demo namespace.'});
 Object.assign(explanations,{STALE_CALCULATION:'A newer calculation is the current candidate. Refresh before reviewing.',CALCULATION_LOCKED:'This case already has an approved issuance basis.',ALREADY_ISSUED:'The case already has a demo issuance batch.',CALCULATION_ALREADY_REVIEWED:'This calculation already has a recorded decision.',VISIT_REQUIRED:'A Needs visit outcome cannot be approved for issuance.',ISSUANCE_BASIS_REQUIRED:'An exact approved calculation basis is required.'});
 Object.assign(explanations,{AUDIT_INTEGRITY_FAILURE:'The audit integrity check failed. Ask the demo administrator to inspect the history.',AUDIT_ANCHOR_MISMATCH:'A recorded blockchain anchor differs from the audit history. Administrator review is required.',AUDIT_VERIFICATION_LIMIT:'The audit history needs a larger verification service. Ask the demo administrator.'});
-Object.assign(explanations,MARKET_MESSAGES,PAYOUT_MESSAGES);
+Object.assign(explanations,MARKET_MESSAGES,PAYOUT_MESSAGES,CERTIFICATE_MESSAGES);
 export default function Home(){
   const [actorId,setActorId]=useState(''),[csrf,setCsrf]=useState(''),[password,setPassword]=useState(''),[showPassword,setShowPassword]=useState(false);
   const [role,setRole]=useState('agent'),[account,setAccount]=useState('presenter');
@@ -122,6 +124,6 @@ export default function Home(){
           {csrf&&calculationCase&&<PanelBoundary name="Demo calculation" key={calculationCase}><DemoCalculationPanel caseId={calculationCase} request={request} canGenerate={role==='agent'}/></PanelBoundary>}
           {!!local.length&&<details open><summary>Your device records ({local.length})</summary><ul>{local.map(item=><li key={item.eventId}><strong>{item.farmerLabel}</strong> — {item.state==='synced'?'Server acknowledged':item.state==='pending'?'Waiting to sync':'Needs review'}{item.onboarding&&<span> · {item.onboarding.plotLabel} · {item.onboarding.crop}</span>}{item.error&&<p className="help">{item.error}</p>}</li>)}</ul></details>}
           <div className="next-step"><span>UP NEXT</span><h3>Track the credit journey</h3><p>Audit proofs and buyer allocation will connect issued demo units to their next stage.</p></div>
-        </section>}</div>{csrf&&role==='agent'&&<PanelBoundary name="Simulated payment provider"><PresenterMarketPanel request={request}/></PanelBoundary>}{csrf&&role==='agent'&&<PanelBoundary name="Farmer payouts"><PresenterPayoutPanel request={request}/></PanelBoundary>}<footer>GreenChain · PWA field capture and review <span>All data in this workspace is synthetic.</span></footer>
+        </section>}</div>{csrf&&role==='agent'&&<PanelBoundary name="Simulated payment provider"><PresenterMarketPanel request={request}/></PanelBoundary>}{csrf&&role==='agent'&&<PanelBoundary name="Farmer payouts"><PresenterPayoutPanel request={request}/></PanelBoundary>}{csrf&&role==='agent'&&<PanelBoundary name="Demo reset"><ScenarioResetPanel request={request} onReset={()=>window.location.reload()}/></PanelBoundary>}<footer>GreenChain · PWA field capture and review <span>All data in this workspace is synthetic.</span></footer>
     </main></div>;
 }
