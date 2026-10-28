@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {formatPaise,quotePaise,remaining,stateLabel,isSettling,ORDER_STATE_LABELS} from '../src/market';
+import {formatPaise,quotePaise,holdCountdown,remaining,stateLabel,isSettling,ORDER_STATE_LABELS} from '../src/market';
 test('paise are formatted exactly, in Indian digit grouping, without floating point',()=>{
   assert.equal(formatPaise('100030'),'₹1,000.30');
   assert.equal(formatPaise('2000600'),'₹20,006.00');
@@ -18,6 +18,14 @@ test('the reservation countdown shows minutes and seconds and ends at zero',()=>
   const now=Date.parse('2026-10-22T10:00:00Z');
   assert.equal(remaining('2026-10-22T10:04:05Z',now),'4:05');
   assert.equal(remaining('2026-10-22T10:00:00Z',now),null);assert.equal(remaining(null,now),null);
+});
+test('the hold countdown shows only while credits are held: a paid order keeps reservedUntil but shows no countdown',()=>{
+  const now=Date.parse('2026-10-22T10:00:00Z'),until='2026-10-22T10:01:48Z';
+  assert.equal(holdCountdown('RESERVED',until,now),'1:48');
+  assert.equal(holdCountdown('AWAITING_PAYMENT',until,now),'1:48');
+  for(const state of Object.keys(ORDER_STATE_LABELS).filter(s=>!['RESERVED','AWAITING_PAYMENT'].includes(s)))
+    assert.equal(holdCountdown(state,until,now),null,state);
+  assert.equal(holdCountdown('RESERVED','2026-10-22T09:59:00Z',now),null);
 });
 test('every order state has a buyer-facing label; settling states are the ones that change without the buyer',()=>{
   for(const s of ['CREATED','RESERVED','AWAITING_PAYMENT','FULFILLED','CANCELLED','EXPIRED','REVALIDATING','REFUND_PENDING','REFUNDED'])assert.ok(ORDER_STATE_LABELS[s],s);

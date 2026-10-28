@@ -45,5 +45,9 @@ export function remaining(untilIso:string|null,nowMs:number):string|null{
   const ms=Date.parse(untilIso)-nowMs;if(!(ms>0))return null;
   const total=Math.floor(ms/1000);return `${Math.floor(total/60)}:${String(total%60).padStart(2,'0')}`;
 }
+/** States in which credits are actually held for the buyer; other states keep reservedUntil only as history. */
+export const isHolding=(state:string)=>['RESERVED','AWAITING_PAYMENT'].includes(state);
+/** The hold countdown, shown only while credits are held (a paid order keeps its old reservedUntil). */
+export const holdCountdown=(state:string,untilIso:string|null,nowMs:number)=>isHolding(state)?remaining(untilIso,nowMs):null;
 /** Orders still moving on their own (the provider or the worker will change them), so the screen should refresh. */
 export const isSettling=(state:string)=>['AWAITING_PAYMENT','REVALIDATING','REFUND_PENDING'].includes(state);

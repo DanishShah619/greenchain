@@ -1,7 +1,7 @@
 'use client';
 import {useEffect,useState,type FormEvent} from 'react';
 import {CertificateView,type Certificate} from './CertificateView';
-import {formatPaise,isSettling,parseQuantity,quotePaise,remaining,SHORTFALL_REASONS,stateLabel} from './market';
+import {formatPaise,isSettling,parseQuantity,holdCountdown,isHolding,quotePaise,SHORTFALL_REASONS,stateLabel} from './market';
 type Request=(path:string,options?:RequestInit)=>Promise<any>;
 type Group={group:string;vintage:number;available:number;reserved:number;sold:number;provenance:{batchId:string;calculationId:string}};
 type Inventory={label:string;asOf:string;unitPricePaise:string|null;available:number;groups:Group[]};
@@ -36,7 +36,7 @@ export function BuyerWorkspace({request,online=true}:{request:Request;online?:bo
   // Countdown tick while something is reserved, and a status refresh while the provider or worker may still change the order.
   useEffect(()=>{
     if(!order)return;
-    const tick=['RESERVED','AWAITING_PAYMENT'].includes(order.order.state)?setInterval(()=>setNow(Date.now()),1000):undefined;
+    const tick=isHolding(order.order.state)?setInterval(()=>setNow(Date.now()),1000):undefined;
     const poll=isSettling(order.order.state)?setInterval(()=>{refresh(order.order.id).catch(()=>{});},3000):undefined;
     return()=>{if(tick)clearInterval(tick);if(poll)clearInterval(poll);};
   },[order?.order.id,order?.order.state]);
@@ -57,7 +57,7 @@ export function BuyerWorkspace({request,online=true}:{request:Request;online?:bo
     catch(error){fail(error,'That did not go through. Refresh and try again.');}finally{setBusy(false);}
   }
   async function open(id:string){setBusy(true);try{setOrder(await request(`/orders/${id}`));setMessage('');}catch(error){fail(error,'Could not open the order.');}finally{setBusy(false);}}
-  const o=order?.order,left=o?remaining(o.reservedUntil,now):null,openAttempt=order?.payments.some(p=>['CREATED','PENDING'].includes(p.state));
+  const o=order?.order,left=o?holdCountdown(o.state,o.reservedUntil,now):null,openAttempt=order?.payments.some(p=>['CREATED','PENDING'].includes(p.state));
   return <section className="card buyer">
     <p className="notice demo-banner" role="note"><strong>Demonstration</strong> — synthetic credits and simulated payments. No real money moves and no recognised carbon credits are sold.</p>
     {!online&&<p className="notice" role="alert">You are offline. Ordering and payment need a connection; nothing is queued on this device.</p>}
