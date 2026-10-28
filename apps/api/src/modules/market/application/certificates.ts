@@ -2,7 +2,7 @@ import type {Database} from '../../../kernel/database.js';
 import {WorkflowError} from '../../../kernel/errors.js';
 import {appendAudit} from '../../audit/application/audit.js';
 import type {Actor} from '../../capture/application/capture.js';
-import {certificateHash,CERTIFICATE_NUMBER,newCertificateNumber} from '../domain/certificate.js';
+import {certificateHash,CERTIFICATE_NUMBER,newCertificateNumber,RETIREMENT_NUMBER} from '../domain/certificate.js';
 import {groupLabel,orderAnchor,ownedOrder,requireBuyer} from './orders.js';
 /**
  * Purchase certificates (docs/24 C1-C6). One per FULFILLED order, built only from stored rows: the order, its ledger rows, the
@@ -77,14 +77,20 @@ export async function getCertificate(db:Database,actor:Actor,orderId:string,o:{a
   return {certificate:view(row)};
 }
 /**
- * Public verification by number (docs/24 C5): the content with the buyer account withheld, whether the stored content still
- * hashes to the stored hash (intact), and, when a hash is given, whether it matches.
+ * Public verification by number (docs/24 C5, docs/25 T4-T5): the content with the buyer account withheld, whether the stored
+ * content still hashes to the stored hash (intact), and, when a hash is given, whether it matches. A purchase certificate also
+ * reports, live, how many of its credits have been retired since: its frozen content cannot say so.
  */
 export async function verifyCertificate(db:Database,number:string,hash?:string){
-  if(!CERTIFICATE_NUMBER.test(number))throw new WorkflowError('NOT_FOUND',404);
-  const row=(await db.query('SELECT number,content,content_sha256,issued_at FROM demo_certificates WHERE number=$1',[number])).rows[0];
+  const retirement=RETIREMENT_NUMBER.test(number);
+  if(!retirement&&!CERTIFICATE_NUMBER.test(number))throw new WorkflowError('NOT_FOUND',404);
+  const row=(await db.query(retirement?'SELECT number,content,content_sha256,issued_at FROM demo_retirement_certificates WHERE number=$1'
+    :'SELECT order_id,number,content,content_sha256,issued_at FROM demo_certificates WHERE number=$1',[number])).rows[0];
   if(!row)throw new WorkflowError('NOT_FOUND',404);
   const intact=certificateHash(row.content)===row.content_sha256;
+  const retired=retirement?undefined:(await db.query(`SELECT count(*) FILTER (WHERE c.state='RETIRED')::int AS credits,count(*)::int AS "of"
+    FROM demo_ledger_entries e JOIN demo_credits c ON c.id=e.credit_id WHERE e.order_id=$1`,[row.order_id])).rows[0];
   return {namespace:'DEMO_ONLY' as const,number:row.number as string,content:{...row.content,buyer:{account:'Demo buyer'}},contentSha256:row.content_sha256 as string,
-    issuedAt:new Date(row.issued_at).toISOString(),intact,...(hash===undefined?{}:{hashMatches:intact&&hash===row.content_sha256})};
+    issuedAt:new Date(row.issued_at).toISOString(),intact,...(hash===undefined?{}:{hashMatches:intact&&hash===row.content_sha256}),
+    ...(retired?{retired:{credits:retired.credits as number,of:retired.of as number}}:{})};
 }

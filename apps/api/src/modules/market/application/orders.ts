@@ -118,7 +118,7 @@ export async function orderView(tx:Database,order:Record<string,any>,extra:{repl
   const unitPrice=money(order.unit_price_paise);
   const attempts=(await tx.query('SELECT id,state,amount_paise,mismatch,created_at FROM demo_payment_attempts WHERE order_id=$1 ORDER BY created_at,id',[order.id])).rows;
   const refunds=(await tx.query('SELECT kind,state,amount_paise FROM demo_payment_refunds WHERE order_id=$1 ORDER BY created_at,id',[order.id])).rows;
-  const ledger=(await tx.query('SELECT credit_id,gross_paise FROM demo_ledger_entries WHERE order_id=$1 ORDER BY credit_id',[order.id])).rows;
+  const ledger=(await tx.query('SELECT e.credit_id,e.gross_paise,c.state FROM demo_ledger_entries e JOIN demo_credits c ON c.id=e.credit_id WHERE e.order_id=$1 ORDER BY e.credit_id',[order.id])).rows;
   return {
     namespace:'DEMO_ONLY' as const,label:DEMO_LABEL,replayed:extra.replayed,
     priceChangedFromQuote:extra.quotedTotalPaise!==undefined&&extra.quotedTotalPaise!==String(unitPrice*BigInt(order.quantity)),
@@ -131,7 +131,7 @@ export async function orderView(tx:Database,order:Record<string,any>,extra:{repl
     items:items.map(i=>({creditId:i.credit_id as string,group:groupLabel(i.group_id),active:i.active as boolean})),
     payments:attempts.map(a=>({id:a.id as string,state:a.state as string,amountPaise:String(a.amount_paise),mismatch:a.mismatch as boolean,createdAt:iso(a.created_at)})),
     refunds:refunds.map(r=>({kind:r.kind as string,state:r.state as string,amountPaise:String(r.amount_paise)})),
-    purchased:ledger.map(l=>({creditId:l.credit_id as string,pricePaise:String(l.gross_paise)})),
+    purchased:ledger.map(l=>({creditId:l.credit_id as string,pricePaise:String(l.gross_paise),retired:l.state==='RETIRED'})),
     allocation:detail?{revision:log.revision as number,asOf:iso(log.as_of),capBasisQuantity:log.cap_basis_q as number,cap:detail.cap as number,ok:detail.ok as boolean,
       reason:(detail.reason??null) as string|null,offeredCount:(detail.offeredCount??null) as number|null,
       groups:(detail.allocations as {groupId:string;count:number}[]).map(a=>({group:groupLabel(a.groupId),count:a.count}))}:null

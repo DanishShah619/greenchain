@@ -20,7 +20,10 @@ test('credits move only along the legal lifecycle and keep their identity',async
     const move=(id:string,state:string)=>db.query('UPDATE demo_credits SET state=$2 WHERE id=$1',[id,state]);
     const state=async(id:string)=>(await db.query('SELECT state FROM demo_credits WHERE id=$1',[id])).rows[0].state;
     // Legal path: AVAILABLE -> RESERVED -> SOLD -> RETIRED, and a released reservation returns to AVAILABLE.
-    await reserveCredit(db,seed,a);await move(a,'SOLD');await move(a,'RETIRED');assert.equal(await state(a),'RETIRED');
+    // SOLD -> RETIRED also needs a retirement record (docs/25 T2); that trigger is set aside here to test the lifecycle guard alone.
+    await reserveCredit(db,seed,a);await move(a,'SOLD');await assert.rejects(move(a,'RETIRED'),/retirement record/);
+    await db.query('ALTER TABLE demo_credits DISABLE TRIGGER demo_credits_retirement');await move(a,'RETIRED');
+    await db.query('ALTER TABLE demo_credits ENABLE TRIGGER demo_credits_retirement');assert.equal(await state(a),'RETIRED');
     await reserveCredit(db,seed,b);await releaseCredit(db,b);assert.equal(await state(b),'AVAILABLE');
     // Skipping a step, going backwards, and leaving a terminal state are all refused.
     await assert.rejects(move(c,'SOLD'),/illegal demo credit transition AVAILABLE -> SOLD/);

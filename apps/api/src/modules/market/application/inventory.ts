@@ -12,7 +12,7 @@ export async function inventory(db:Database,actor:Actor){
   const price=await priceNow(db,actor.scenarioId);
   if(!(await db.query('SELECT 1 FROM demo_namespaces WHERE scenario_id=$1',[actor.scenarioId])).rows.length)throw new WorkflowError('DEMO_SCOPE_ONLY',403);
   const rows=(await db.query(`SELECT b.capture_id,b.id AS batch_id,b.run_id,b.vintage,
-      count(*) FILTER (WHERE c.state='AVAILABLE')::int AS available,count(*) FILTER (WHERE c.state='RESERVED')::int AS reserved,count(*) FILTER (WHERE c.state='SOLD')::int AS sold
+      count(*) FILTER (WHERE c.state='AVAILABLE')::int AS available,count(*) FILTER (WHERE c.state='RESERVED')::int AS reserved,count(*) FILTER (WHERE c.state IN ('SOLD','RETIRED'))::int AS sold
     FROM demo_issuance_batches b JOIN demo_credits c ON c.batch_id=b.id WHERE b.scenario_id=$1 GROUP BY b.capture_id,b.id,b.run_id,b.vintage`,[actor.scenarioId])).rows;
   const groups=rows.map(r=>({group:groupLabel(r.capture_id),vintage:r.vintage as number,available:r.available as number,reserved:r.reserved as number,sold:r.sold as number,
     provenance:{batchId:r.batch_id as string,calculationId:r.run_id as string}})).sort((a,b)=>b.available-a.available||(a.group<b.group?-1:1));
@@ -27,7 +27,7 @@ export async function inventory(db:Database,actor:Actor){
 export async function showcaseMarket(db:Database,scenarioId:string){
   const price=await priceNow(db,scenarioId);
   const row=(await db.query(`SELECT count(DISTINCT b.capture_id)::int AS groups,count(*) FILTER (WHERE c.state='AVAILABLE')::int AS available,
-      count(*) FILTER (WHERE c.state='RESERVED')::int AS reserved,count(*) FILTER (WHERE c.state='SOLD')::int AS sold
+      count(*) FILTER (WHERE c.state='RESERVED')::int AS reserved,count(*) FILTER (WHERE c.state IN ('SOLD','RETIRED'))::int AS sold
     FROM demo_issuance_batches b JOIN demo_credits c ON c.batch_id=b.id WHERE b.scenario_id=$1`,[scenarioId])).rows[0];
   return {namespace:'DEMO_ONLY' as const,label:DEMO_LABEL,currency:'INR' as const,unitPricePaise:price?String(price.unit_price_paise):null,
     groups:row.groups as number,available:row.available as number,reserved:row.reserved as number,sold:row.sold as number};

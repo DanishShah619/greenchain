@@ -1,5 +1,5 @@
 /** Pure helpers for purchase certificates, their public verification page, and the presenter reset (docs/24). */
-const NUMBER=/^GC-DEMO-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/,HASH=/^[0-9a-f]{64}$/,TX=/^0x[0-9a-fA-F]{64}$/;
+const NUMBER=/^GC-(DEMO|RETIRE)-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/,HASH=/^[0-9a-f]{64}$/,TX=/^0x[0-9a-fA-F]{64}$/;
 export const isCertificateNumber=(value:string)=>NUMBER.test(value);
 /** The human verification page for a certificate (the PWA's exported verify.html, which any static host serves without rewrites), carrying the number and its content hash. */
 export function verifyLink(origin:string,number:string,hash:string):string{

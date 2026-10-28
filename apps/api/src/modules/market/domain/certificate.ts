@@ -22,9 +22,11 @@ export const certificateHash=(content:unknown)=>createHash('sha256').update(cano
 /** Crockford base32: no I, L, O or U, so a number read aloud or printed cannot be confused. */
 const ALPHABET='0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 export const CERTIFICATE_NUMBER=/^GC-DEMO-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/;
+/** Retirement certificates (docs/25 T4) use their own prefix, so a number says which kind of certificate it is. */
+export const RETIREMENT_NUMBER=/^GC-RETIRE-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/;
 /** 40 random bits: not sequential, so numbers cannot be enumerated (the public verification route is rate-limited too). */
-export function newCertificateNumber():string{
+export function newCertificateNumber(prefix:'GC-DEMO'|'GC-RETIRE'='GC-DEMO'):string{
   const bytes=randomBytes(5);let bits=0n;for(const b of bytes)bits=(bits<<8n)|BigInt(b);
   let out='';for(let i=0;i<8;i++){out=ALPHABET[Number(bits&31n)]+out;bits>>=5n;}
-  return `GC-DEMO-${out.slice(0,4)}-${out.slice(4)}`;
+  return `${prefix}-${out.slice(0,4)}-${out.slice(4)}`;
 }
